@@ -619,6 +619,62 @@ impl ArmTrackerApp {
                         painter.circle_filled(pos, 8.0, color);
                         painter.circle_stroke(pos, 10.0, egui::Stroke::new(2.0, egui::Color32::WHITE));
                     }
+
+                    for (side, hand) in &self.current_result.hands {
+                        if !hand.is_tracked {
+                            continue;
+                        }
+                        
+                        let hand_color = if side == "left" {
+                            egui::Color32::from_rgb(255, 100, 100)
+                        } else {
+                            egui::Color32::from_rgb(100, 100, 255)
+                        };
+                        
+                        // Draw hand landmarks
+                        for (i, landmark) in hand.landmarks.iter().enumerate() {
+                            let pos = egui::pos2(
+                                rect.left() + landmark.x as f32 * rect.width(),
+                                rect.top() + landmark.y as f32 * rect.height(),
+                            );
+                            
+                            // Larger circle for wrist, smaller for other landmarks
+                            let radius = if i == 0 { 6.0 } else { 3.0 };
+                            painter.circle_filled(pos, radius, hand_color);
+                        }
+                        
+                        // Draw connections between finger joints
+                        let finger_connections = [
+                            // Thumb
+                            (0, 1), (1, 2), (2, 3), (3, 4),
+                            // Index
+                            (0, 5), (5, 6), (6, 7), (7, 8),
+                            // Middle
+                            (0, 9), (9, 10), (10, 11), (11, 12),
+                            // Ring
+                            (0, 13), (13, 14), (14, 15), (15, 16),
+                            // Pinky
+                            (0, 17), (17, 18), (18, 19), (19, 20),
+                        ];
+                        
+                        for (from, to) in finger_connections.iter() {
+                            if *from < hand.landmarks.len() && *to < hand.landmarks.len() {
+                                let from_pos = egui::pos2(
+                                    rect.left() + hand.landmarks[*from].x as f32 * rect.width(),
+                                    rect.top() + hand.landmarks[*from].y as f32 * rect.height(),
+                                );
+                                let to_pos = egui::pos2(
+                                    rect.left() + hand.landmarks[*to].x as f32 * rect.width(),
+                                    rect.top() + hand.landmarks[*to].y as f32 * rect.height(),
+                                );
+                                
+                                painter.line_segment(
+                                    [from_pos, to_pos],
+                                    egui::Stroke::new(2.0, hand_color.linear_multiply(0.7)),
+                                );
+                            }
+                        }
+                    }
                 }
             });
         } else {

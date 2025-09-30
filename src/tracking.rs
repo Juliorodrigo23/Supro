@@ -99,14 +99,14 @@ impl Default for TrackerConfig {
         Self {
             history_size: 10,
             confidence_threshold: 0.6,
-            gesture_angle_threshold: 0.1,
-            min_rotation_threshold: 0.05,
-            rotation_smoothing_factor: 0.6,  // Changed from 0.5 to match C++
+            gesture_angle_threshold: 0.05,  // Lowered from 0.1
+            min_rotation_threshold: 0.03,   // Lowered from 0.05
+            rotation_smoothing_factor: 0.5,  // Lowered from 0.6 for faster response
             min_stable_frames: 2,
             enable_kalman: true,
             downsample_width: 640,
-            adaptive_frame_skip: true,
-            max_frame_skip: 5,
+            adaptive_frame_skip: false,  // Disable adaptive skipping
+            max_frame_skip: 1,
         }
     }
 }
@@ -366,7 +366,6 @@ impl ArmTracker {
             return;
         }
         
-        // Convert to Vector3
         let landmarks: Vec<Vector3<f64>> = hand_landmarks.iter()
             .map(|lm| Vector3::new(lm[0], lm[1], lm[2]))
             .collect();
@@ -374,6 +373,24 @@ impl ArmTracker {
         // Determine which hand (simplified - you might want to improve this)
         let side = if hand_index == 0 { "left" } else { "right" };
         
+        let wrist_pos = landmarks[0];
+
+        let side = if result.joints.contains_key("left_wrist") && 
+                    result.joints.contains_key("right_wrist") {
+            let left_wrist = &result.joints["left_wrist"].position;
+            let right_wrist = &result.joints["right_wrist"].position;
+            
+            let dist_left = (wrist_pos - left_wrist).norm();
+            let dist_right = (wrist_pos - right_wrist).norm();
+            
+            if dist_left < dist_right { "left" } else { "right" }
+        } else {
+            // Fallback: use x-coordinate (left side of frame = left hand)
+            if wrist_pos.x < 0.5 { "left" } else { "right" }
+        };
+        
+        eprintln!("DEBUG: Hand {} assigned to {} side (confidence check)", hand_index, side);
+
         let hand_state = HandState {
             landmarks: landmarks.clone(),
             confidences: vec![1.0; landmarks.len()], // MediaPipe doesn't provide per-landmark confidence
