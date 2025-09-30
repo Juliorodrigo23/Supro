@@ -100,7 +100,9 @@ impl VideoSource {
                 let img = ImageBuffer::from_raw(width, height, rgba_data)
                     .ok_or_else(|| anyhow::anyhow!("Failed to create image buffer"))?;
                 
-                Ok(DynamicImage::ImageRgba8(img))
+                let flipped = image::imageops::flip_horizontal(&img);
+            
+                Ok(DynamicImage::ImageRgba8(flipped))
             }
             VideoSource::File(_, _) => {
                 // For file playback, return a placeholder for now

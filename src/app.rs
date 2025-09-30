@@ -115,32 +115,51 @@ impl ArmTrackerApp {
         let available_size = ui.available_size();
         
         if let Some(texture_id) = self.get_current_frame_texture(with_overlay) {
-            let aspect_ratio = 16.0 / 9.0;
+            // Calculate aspect ratio from actual frame dimensions
+            let aspect_ratio = if let Some(src) = &self.video_source {
+                if let Some(info) = src.get_info() {
+                    info.width as f32 / info.height as f32
+                } else {
+                    4.0 / 3.0  // Default for 640x480
+                }
+            } else {
+                4.0 / 3.0
+            };
+            
+            // Fit to available space while maintaining aspect ratio
             let display_width = available_size.x - 20.0;
             let display_height = display_width / aspect_ratio;
             
-            ui.centered_and_justified(|ui| {
-                let response = ui.allocate_response(
+            // Center the video if there's extra vertical space
+            let vertical_offset = ((available_size.y - display_height) / 2.0).max(0.0);
+            
+            ui.allocate_ui_at_rect(
+                egui::Rect::from_min_size(
+                    ui.cursor().min + egui::vec2(10.0, vertical_offset),
                     egui::vec2(display_width, display_height),
-                    egui::Sense::hover()
-                );
-                
-                ui.painter().image(
-                    texture_id,
-                    response.rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    egui::Color32::WHITE,
-                );
-                
-                // Draw overlay only if requested and tracking data exists
-                if with_overlay && !self.current_result.tracking_lost {
-                    // Overlay drawing code here...
+                ),
+                |ui| {
+                    let response = ui.allocate_response(
+                        egui::vec2(display_width, display_height),
+                        egui::Sense::hover()
+                    );
+                    
+                    ui.painter().image(
+                        texture_id,
+                        response.rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                    
+                    // Draw overlay...
+                    if with_overlay && !self.current_result.tracking_lost {
+                        // ... existing overlay code
+                    }
                 }
-            });
+            );
         } else {
             ui.centered_and_justified(|ui| {
                 ui.label("No video feed available");
-                ui.label("Click 'Start Camera' to begin");
             });
         }
     }

@@ -78,6 +78,8 @@ pub struct ArmTracker {
     adaptive_skip_rate: usize,
     last_confidence: f64,
     joint_filters: HashMap<String, KalmanFilter>,
+    hand_state_cache: HashMap<String, (HandState, u32)>,
+    hand_filters: HashMap<String, Vec<KalmanFilter>>,
 }
 
 #[derive(Debug, Clone)]
@@ -189,6 +191,8 @@ impl ArmTracker {
             adaptive_skip_rate: 1,
             last_confidence: 0.0,
             joint_filters: HashMap::new(),
+            hand_state_cache: HashMap::new(),
+            hand_filters: HashMap::new(),
         };
         
         // Initialize tracking flags
@@ -385,11 +389,20 @@ impl ArmTracker {
             
             if dist_left < dist_right { "left" } else { "right" }
         } else {
-            // Fallback: use x-coordinate (left side of frame = left hand)
             if wrist_pos.x < 0.5 { "left" } else { "right" }
         };
         
         eprintln!("DEBUG: Hand {} assigned to {} side (confidence check)", hand_index, side);
+
+        let filters = self.get_or_create_hand_filters(side);
+        let mut smoothed_landmarks = Vec::new();
+        
+        for (i, lm) in hand_landmarks.iter().enumerate() {
+            let measurement = Vector3::new(lm[0], lm[1], lm[2]);
+            filters[i].predict();
+            filters[i].update(measurement);
+            smoothed_landmarks.push(filters[i].position());
+        }
 
         let hand_state = HandState {
             landmarks: landmarks.clone(),
@@ -397,7 +410,9 @@ impl ArmTracker {
             is_tracked: true,
         };
         
+        self.hand_state_cache.insert(side.to_string(), (hand_state.clone(), 0));
         result.hands.insert(side.to_string(), hand_state);
+
         
         // Calculate gesture if we have arm joints
         if result.joints.contains_key(&format!("{}_shoulder", side)) &&
@@ -450,6 +465,12 @@ impl ArmTracker {
         Ok((result, self.metrics.clone()))
     }
 
+    fn get_or_create_hand_filters(&mut self, side: &str) -> &mut Vec<KalmanFilter> {
+        self.hand_filters.entry(side.to_string())
+            .or_insert_with(|| {
+                (0..21).map(|_| KalmanFilter::new()).collect()
+            })
+    }
 
     fn calculate_arm_rotation_enhanced(
         &mut self, 
@@ -619,7 +640,23 @@ impl ArmTracker {
                         self.process_hand_landmarks(hand_lms, i, &mut result);
                     }
                     
-                    result.tracking_lost = false;
+                   // PERSISTENCE: Use cached hands if not detected this frame
+                        for side in ["left", "right"] {
+                            if !result.hands.contains_key(side) {
+                                if let Some((cached_hand, frames_old)) = self.hand_state_cache.get_mut(side) {
+                                    if *frames_old < 5 {  // Keep cached state for up to 5 frames
+                                        result.hands.insert(side.to_string(), cached_hand.clone());
+                                        *frames_old += 1;
+                                        eprintln!("DEBUG: Using cached {} hand (age: {})", side, frames_old);
+                                    } else {
+                                        // Too old, remove from cache
+                                        self.hand_state_cache.remove(side);
+                                    }
+                                }
+                            }
+                        }
+                        
+                        result.tracking_lost = false;
                 }
             }
             Err(e) => {

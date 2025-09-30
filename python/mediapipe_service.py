@@ -31,8 +31,8 @@ class MediaPipeService:
             static_image_mode=False,
             max_num_hands=2,
             model_complexity=1,  # Changed from 0 to 1
-            min_detection_confidence=0.3,  # Lowered from 0.5
-            min_tracking_confidence=0.3
+            min_detection_confidence=0.4,  # Lowered from 0.5
+            min_tracking_confidence=0.4
         )
         
         print("MediaPipe service initialized with hands enabled", file=sys.stderr)
