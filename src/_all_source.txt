@@ -129,32 +129,51 @@ impl ArmTrackerApp {
         let available_size = ui.available_size();
         
         if let Some(texture_id) = self.get_current_frame_texture(with_overlay) {
-            let aspect_ratio = 16.0 / 9.0;
+            // Calculate aspect ratio from actual frame dimensions
+            let aspect_ratio = if let Some(src) = &self.video_source {
+                if let Some(info) = src.get_info() {
+                    info.width as f32 / info.height as f32
+                } else {
+                    4.0 / 3.0  // Default for 640x480
+                }
+            } else {
+                4.0 / 3.0
+            };
+            
+            // Fit to available space while maintaining aspect ratio
             let display_width = available_size.x - 20.0;
             let display_height = display_width / aspect_ratio;
             
-            ui.centered_and_justified(|ui| {
-                let response = ui.allocate_response(
+            // Center the video if there's extra vertical space
+            let vertical_offset = ((available_size.y - display_height) / 2.0).max(0.0);
+            
+            ui.allocate_ui_at_rect(
+                egui::Rect::from_min_size(
+                    ui.cursor().min + egui::vec2(10.0, vertical_offset),
                     egui::vec2(display_width, display_height),
-                    egui::Sense::hover()
-                );
-                
-                ui.painter().image(
-                    texture_id,
-                    response.rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    egui::Color32::WHITE,
-                );
-                
-                // Draw overlay only if requested and tracking data exists
-                if with_overlay && !self.current_result.tracking_lost {
-                    // Overlay drawing code here...
+                ),
+                |ui| {
+                    let response = ui.allocate_response(
+                        egui::vec2(display_width, display_height),
+                        egui::Sense::hover()
+                    );
+                    
+                    ui.painter().image(
+                        texture_id,
+                        response.rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                    
+                    // Draw overlay...
+                    if with_overlay && !self.current_result.tracking_lost {
+                        // ... existing overlay code
+                    }
                 }
-            });
+            );
         } else {
             ui.centered_and_justified(|ui| {
                 ui.label("No video feed available");
-                ui.label("Click 'Start Camera' to begin");
             });
         }
     }
@@ -244,7 +263,6 @@ impl ArmTrackerApp {
     }
 
    fn start_camera(&mut self) {
-    // If already open, just probe a frame
     if let Some(src) = self.video_source.as_mut() {
         if let Err(e) = src.read_frame() {
             eprintln!("Camera already open but failed to read frame: {e}");
@@ -257,27 +275,23 @@ impl ArmTrackerApp {
     // Try to open camera
     match VideoSource::new_camera(0) {
         Ok(mut src) => {
-            // Probe one frame to ensure the pipeline is live
             match src.read_frame() {
                 Ok(frame) => {
                     eprintln!("Camera started: {}x{}", frame.width(), frame.height());
                     self.video_source = Some(src);
                     self.mediapipe_status = MediaPipeStatus::Initializing;
                     
-                    // Initialize MediaPipe synchronously (blocking)
-                    eprintln!("Initializing MediaPipe...");
-                    if let Ok(mut tracker) = self.tracker.lock() {
-                        tracker.initialize_mediapipe();
+                    // DELAYED MediaPipe initialization - spawn in background
+                    let tracker = Arc::clone(&self.tracker);
+                    std::thread::spawn(move || {
+                        // Wait 500ms for camera to stabilize
+                        std::thread::sleep(std::time::Duration::from_millis(500));
                         
-                        // Check if initialization succeeded
-                        if tracker.is_using_mediapipe() {
-                            self.mediapipe_status = MediaPipeStatus::Ready;
-                            eprintln!("✓ MediaPipe ready!");
-                        } else {
-                            self.mediapipe_status = MediaPipeStatus::SimulationMode;
-                            eprintln!("⚠ MediaPipe failed, using simulation mode");
+                        eprintln!("Starting MediaPipe initialization...");
+                        if let Ok(mut t) = tracker.lock() {
+                            t.initialize_mediapipe();
                         }
-                    }
+                    });
                 }
                 Err(e) => {
                     eprintln!("Camera opened but failed to read first frame: {e}");
@@ -637,6 +651,62 @@ impl ArmTrackerApp {
                         
                         painter.circle_filled(pos, 8.0, color);
                         painter.circle_stroke(pos, 10.0, egui::Stroke::new(2.0, egui::Color32::WHITE));
+                    }
+
+                    for (side, hand) in &self.current_result.hands {
+                        if !hand.is_tracked {
+                            continue;
+                        }
+                        
+                        let hand_color = if side == "left" {
+                            egui::Color32::from_rgb(255, 100, 100)
+                        } else {
+                            egui::Color32::from_rgb(100, 100, 255)
+                        };
+                        
+                        // Draw hand landmarks
+                        for (i, landmark) in hand.landmarks.iter().enumerate() {
+                            let pos = egui::pos2(
+                                rect.left() + landmark.x as f32 * rect.width(),
+                                rect.top() + landmark.y as f32 * rect.height(),
+                            );
+                            
+                            // Larger circle for wrist, smaller for other landmarks
+                            let radius = if i == 0 { 6.0 } else { 3.0 };
+                            painter.circle_filled(pos, radius, hand_color);
+                        }
+                        
+                        // Draw connections between finger joints
+                        let finger_connections = [
+                            // Thumb
+                            (0, 1), (1, 2), (2, 3), (3, 4),
+                            // Index
+                            (0, 5), (5, 6), (6, 7), (7, 8),
+                            // Middle
+                            (0, 9), (9, 10), (10, 11), (11, 12),
+                            // Ring
+                            (0, 13), (13, 14), (14, 15), (15, 16),
+                            // Pinky
+                            (0, 17), (17, 18), (18, 19), (19, 20),
+                        ];
+                        
+                        for (from, to) in finger_connections.iter() {
+                            if *from < hand.landmarks.len() && *to < hand.landmarks.len() {
+                                let from_pos = egui::pos2(
+                                    rect.left() + hand.landmarks[*from].x as f32 * rect.width(),
+                                    rect.top() + hand.landmarks[*from].y as f32 * rect.height(),
+                                );
+                                let to_pos = egui::pos2(
+                                    rect.left() + hand.landmarks[*to].x as f32 * rect.width(),
+                                    rect.top() + hand.landmarks[*to].y as f32 * rect.height(),
+                                );
+                                
+                                painter.line_segment(
+                                    [from_pos, to_pos],
+                                    egui::Stroke::new(2.0, hand_color.linear_multiply(0.7)),
+                                );
+                            }
+                        }
                     }
                 }
             });
@@ -1528,22 +1598,26 @@ impl MediaPipeWrapper {
     pub fn new() -> Result<Self> {
         eprintln!("=== MediaPipe Initialization ===");
         
-        // Get current working directory
-        let cwd = std::env::current_dir()?;
-        eprintln!("Current directory: {}", cwd.display());
+        // Try multiple paths to find the Python script
+        let possible_paths = vec![
+            // For bundled app
+            std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(|p| p.join("../Resources/python/mediapipe_service.py"))),
+            // For development
+            std::env::current_dir().ok().map(|d| d.join("python/mediapipe_service.py")),
+        ];
         
-        // Check if Python script exists
-        let script_path = cwd.join("python/mediapipe_service.py");
-        eprintln!("Looking for script at: {}", script_path.display());
+        let script_path = possible_paths
+            .into_iter()
+            .flatten()
+            .find(|p| p.exists())
+            .ok_or_else(|| anyhow::anyhow!("Could not find mediapipe_service.py"))?;
         
-        if !script_path.exists() {
-            return Err(anyhow::anyhow!("Python script not found at {}", script_path.display()));
-        }
-        
-        eprintln!("Script found! Attempting to start Python process...");
+        eprintln!("Found Python script at: {}", script_path.display());
         
         let mut child = Command::new("python3")
-            .arg(script_path)
+            .arg(&script_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -1746,6 +1820,8 @@ pub struct ArmTracker {
     adaptive_skip_rate: usize,
     last_confidence: f64,
     joint_filters: HashMap<String, KalmanFilter>,
+    hand_state_cache: HashMap<String, (HandState, u32)>,
+    hand_filters: HashMap<String, Vec<KalmanFilter>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1767,14 +1843,14 @@ impl Default for TrackerConfig {
         Self {
             history_size: 10,
             confidence_threshold: 0.6,
-            gesture_angle_threshold: 0.1,
-            min_rotation_threshold: 0.05,
-            rotation_smoothing_factor: 0.6,  // Changed from 0.5 to match C++
+            gesture_angle_threshold: 0.05,  // Lowered from 0.1
+            min_rotation_threshold: 0.03,   // Lowered from 0.05
+            rotation_smoothing_factor: 0.5,  // Lowered from 0.6 for faster response
             min_stable_frames: 2,
             enable_kalman: true,
             downsample_width: 640,
-            adaptive_frame_skip: true,
-            max_frame_skip: 5,
+            adaptive_frame_skip: false,  // Disable adaptive skipping
+            max_frame_skip: 1,
         }
     }
 }
@@ -1857,6 +1933,8 @@ impl ArmTracker {
             adaptive_skip_rate: 1,
             last_confidence: 0.0,
             joint_filters: HashMap::new(),
+            hand_state_cache: HashMap::new(),
+            hand_filters: HashMap::new(),
         };
         
         // Initialize tracking flags
@@ -2029,51 +2107,92 @@ impl ArmTracker {
     }
 
     // Add the missing process_hand_landmarks method
-    fn process_hand_landmarks(&mut self, hand_landmarks: &[[f64; 3]], hand_index: usize, result: &mut TrackingResult) {
-        if hand_landmarks.len() < 21 {
+    // Add the missing process_hand_landmarks method
+fn process_hand_landmarks(&mut self, hand_landmarks: &[[f64; 3]], hand_index: usize, result: &mut TrackingResult) {
+    if hand_landmarks.len() < 21 {
+        return;
+    }
+    
+    let landmarks: Vec<Vector3<f64>> = hand_landmarks.iter()
+        .map(|lm| Vector3::new(lm[0], lm[1], lm[2]))
+        .collect();
+    
+    let wrist_pos = landmarks[0];
+
+    // Determine which hand based on wrist position relative to body center
+    // In camera view: lower x values (< 0.5) are typically on the right side of screen (person's right hand)
+    // higher x values (> 0.5) are typically on the left side of screen (person's left hand)
+    // BUT from the person's perspective facing the camera, it's the opposite
+    
+        let side = if result.joints.contains_key("left_wrist") && 
+                result.joints.contains_key("right_wrist") {
+            let left_wrist = &result.joints["left_wrist"].position;
+            let right_wrist = &result.joints["right_wrist"].position;
+            
+            let dist_left = (wrist_pos - left_wrist).norm();
+            let dist_right = (wrist_pos - right_wrist).norm();
+            
+            // Add distance threshold for validity
+            const MAX_HAND_ARM_DISTANCE: f64 = 0.15; // Adjust based on your coordinate system
+            
+            if dist_left.min(dist_right) > MAX_HAND_ARM_DISTANCE {
+                eprintln!("Hand {} too far from any arm joint, skipping", hand_index);
+                return;  // Skip this hand entirely
+            }
+            
+            if dist_left < dist_right { "left" } else { "right" }
+        } else {
+            // If no arm joints, don't guess - skip this hand
+            eprintln!("No arm joints available, cannot assign hand {}", hand_index);
             return;
-        }
-        
-        // Convert to Vector3
-        let landmarks: Vec<Vector3<f64>> = hand_landmarks.iter()
-            .map(|lm| Vector3::new(lm[0], lm[1], lm[2]))
-            .collect();
-        
-        // Determine which hand (simplified - you might want to improve this)
-        let side = if hand_index == 0 { "left" } else { "right" };
-        
-        let hand_state = HandState {
-            landmarks: landmarks.clone(),
-            confidences: vec![1.0; landmarks.len()], // MediaPipe doesn't provide per-landmark confidence
-            is_tracked: true,
         };
+    
+    eprintln!("DEBUG: Hand {} at x={:.2} assigned to {} side", hand_index, wrist_pos.x, side);
+
+    let filters = self.get_or_create_hand_filters(side);
+    let mut smoothed_landmarks = Vec::new();
+    
+    for (i, lm) in hand_landmarks.iter().enumerate() {
+        let measurement = Vector3::new(lm[0], lm[1], lm[2]);
+        filters[i].predict();
+        filters[i].update(measurement);
+        smoothed_landmarks.push(filters[i].position());
+    }
+
+    let hand_state = HandState {
+        landmarks: smoothed_landmarks.clone(),  // Use smoothed landmarks
+        confidences: vec![1.0; smoothed_landmarks.len()],
+        is_tracked: true,
+    };
+    
+    self.hand_state_cache.insert(side.to_string(), (hand_state.clone(), 0));
+    result.hands.insert(side.to_string(), hand_state);
+
+    
+    // Calculate gesture if we have arm joints
+    if result.joints.contains_key(&format!("{}_shoulder", side)) &&
+       result.joints.contains_key(&format!("{}_elbow", side)) &&
+       result.joints.contains_key(&format!("{}_wrist", side)) {
         
-        result.hands.insert(side.to_string(), hand_state);
+        let shoulder = &result.joints[&format!("{}_shoulder", side)].position;
+        let elbow = &result.joints[&format!("{}_elbow", side)].position;
+        let wrist = &result.joints[&format!("{}_wrist", side)].position;
         
-        // Calculate gesture if we have arm joints
-        if result.joints.contains_key(&format!("{}_shoulder", side)) &&
-           result.joints.contains_key(&format!("{}_elbow", side)) &&
-           result.joints.contains_key(&format!("{}_wrist", side)) {
-            
-            let shoulder = &result.joints[&format!("{}_shoulder", side)].position;
-            let elbow = &result.joints[&format!("{}_elbow", side)].position;
-            let wrist = &result.joints[&format!("{}_wrist", side)].position;
-            
-            if let Some(gesture) = self.calculate_arm_rotation_enhanced(
-                side,
-                shoulder,
-                elbow,
-                wrist,
-                Some(&landmarks)
-            ) {
-                if side == "left" {
-                    result.left_gesture = Some(gesture);
-                } else {
-                    result.right_gesture = Some(gesture);
-                }
+        if let Some(gesture) = self.calculate_arm_rotation_enhanced(
+            side,
+            shoulder,
+            elbow,
+            wrist,
+            Some(&smoothed_landmarks)  // Use smoothed landmarks
+        ) {
+            if side == "left" {
+                result.left_gesture = Some(gesture);
+            } else {
+                result.right_gesture = Some(gesture);
             }
         }
     }
+}
 
     pub fn process_frame_with_metrics(&mut self, frame: &DynamicImage) -> Result<(TrackingResult, PerformanceMetrics)> {
         let start = Instant::now();
@@ -2101,6 +2220,12 @@ impl ArmTracker {
         Ok((result, self.metrics.clone()))
     }
 
+    fn get_or_create_hand_filters(&mut self, side: &str) -> &mut Vec<KalmanFilter> {
+        self.hand_filters.entry(side.to_string())
+            .or_insert_with(|| {
+                (0..21).map(|_| KalmanFilter::new()).collect()
+            })
+    }
 
     fn calculate_arm_rotation_enhanced(
         &mut self, 
@@ -2252,22 +2377,39 @@ impl ArmTracker {
     }
 
 
-    pub fn process_frame(&mut self, frame: &DynamicImage) -> Result<TrackingResult> {
+pub fn process_frame(&mut self, frame: &DynamicImage) -> Result<TrackingResult> {
     let mut result = TrackingResult::default();
     result.timestamp = self.sim_time;
     self.sim_time += 0.033;
     self.frame_counter += 1;
     
     if let Some(ref mut mp) = self.mediapipe {
-        // PROCESS EVERY FRAME - no skipping
         match mp.process_image(frame) {
             Ok(mp_result) => {
                 if mp_result.pose_landmarks.len() > 16 {
                     self.process_pose_with_kalman(&mp_result.pose_landmarks, &mut result);
                     
-                    // Process hands if available
+                    // ALWAYS process hands when detected - remove confidence gate
                     for (i, hand_lms) in mp_result.hand_landmarks.iter().enumerate() {
                         self.process_hand_landmarks(hand_lms, i, &mut result);
+                    }
+                    
+                    // Hand cache logic (only for 1 frame)
+                    for side in ["left", "right"] {
+                        if !result.hands.contains_key(side) {
+                            if let Some((cached_hand, frames_old)) = self.hand_state_cache.get_mut(side) {
+                                if *frames_old < 1 {
+                                    if result.joints.contains_key(&format!("{}_wrist", side)) {
+                                        result.hands.insert(side.to_string(), cached_hand.clone());
+                                        *frames_old += 1;
+                                    } else {
+                                        self.hand_state_cache.remove(side);
+                                    }
+                                } else {
+                                    self.hand_state_cache.remove(side);
+                                }
+                            }
+                        }
                     }
                     
                     result.tracking_lost = false;
@@ -2822,7 +2964,9 @@ impl VideoSource {
                 let img = ImageBuffer::from_raw(width, height, rgba_data)
                     .ok_or_else(|| anyhow::anyhow!("Failed to create image buffer"))?;
                 
-                Ok(DynamicImage::ImageRgba8(img))
+                let flipped = image::imageops::flip_horizontal(&img);
+            
+                Ok(DynamicImage::ImageRgba8(flipped))
             }
             VideoSource::File(_, _) => {
                 // For file playback, return a placeholder for now
@@ -3173,8 +3317,8 @@ class MediaPipeService:
             static_image_mode=False,
             max_num_hands=2,
             model_complexity=1,  # Changed from 0 to 1
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5  # Increased from 0.3
+            min_detection_confidence=0.4,  # Lowered from 0.5
+            min_tracking_confidence=0.4
         )
         
         print("MediaPipe service initialized with hands enabled", file=sys.stderr)

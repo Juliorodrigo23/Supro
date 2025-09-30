@@ -376,32 +376,42 @@ fn process_hand_landmarks(&mut self, hand_landmarks: &[[f64; 3]], hand_index: us
         .collect();
     
     let wrist_pos = landmarks[0];
-
-    // Determine which hand based on wrist position relative to body center
-    // In camera view: lower x values (< 0.5) are typically on the right side of screen (person's right hand)
-    // higher x values (> 0.5) are typically on the left side of screen (person's left hand)
-    // BUT from the person's perspective facing the camera, it's the opposite
     
+    // Try to match to wrist joints first (strictest)
     let side = if result.joints.contains_key("left_wrist") && 
                 result.joints.contains_key("right_wrist") {
-        // If we have arm joints, match to closest wrist
         let left_wrist = &result.joints["left_wrist"].position;
         let right_wrist = &result.joints["right_wrist"].position;
         
         let dist_left = (wrist_pos - left_wrist).norm();
         let dist_right = (wrist_pos - right_wrist).norm();
         
-        if dist_left < dist_right { "left" } else { "right" }
+        eprintln!("Hand {} distances - left: {:.3}, right: {:.3}", hand_index, dist_left, dist_right);
+        
+        // Increased threshold - MediaPipe coordinates are 0-1 range
+        const MAX_HAND_ARM_DISTANCE: f64 = 0.3; // DOUBLED from 0.15
+        
+        if dist_left.min(dist_right) > MAX_HAND_ARM_DISTANCE {
+            eprintln!("Hand {} too far from wrists (min dist: {:.3}), trying position fallback", 
+                     hand_index, dist_left.min(dist_right));
+            
+            // FALLBACK: Use x-position if distances too large
+            if wrist_pos.x < 0.5 { "right" } else { "left" }
+        } else {
+            if dist_left < dist_right { "left" } else { "right" }
+        }
     } else {
-        // Fallback: use x-position
-        // Camera view: x < 0.5 is right side of screen (person's RIGHT hand)
-        //              x > 0.5 is left side of screen (person's LEFT hand)
-        // Since the person is facing the camera, we need to flip this
+        eprintln!("Missing wrist joints - left: {}, right: {}", 
+                 result.joints.contains_key("left_wrist"),
+                 result.joints.contains_key("right_wrist"));
+        
+        // FALLBACK: Use x-position
         if wrist_pos.x < 0.5 { "right" } else { "left" }
     };
     
-    eprintln!("DEBUG: Hand {} at x={:.2} assigned to {} side", hand_index, wrist_pos.x, side);
-
+    eprintln!("Hand {} assigned to {} side", hand_index, side);
+    
+    // Rest of your code unchanged...
     let filters = self.get_or_create_hand_filters(side);
     let mut smoothed_landmarks = Vec::new();
     
@@ -413,14 +423,13 @@ fn process_hand_landmarks(&mut self, hand_landmarks: &[[f64; 3]], hand_index: us
     }
 
     let hand_state = HandState {
-        landmarks: smoothed_landmarks.clone(),  // Use smoothed landmarks
+        landmarks: smoothed_landmarks.clone(),
         confidences: vec![1.0; smoothed_landmarks.len()],
         is_tracked: true,
     };
     
     self.hand_state_cache.insert(side.to_string(), (hand_state.clone(), 0));
     result.hands.insert(side.to_string(), hand_state);
-
     
     // Calculate gesture if we have arm joints
     if result.joints.contains_key(&format!("{}_shoulder", side)) &&
@@ -436,7 +445,7 @@ fn process_hand_landmarks(&mut self, hand_landmarks: &[[f64; 3]], hand_index: us
             shoulder,
             elbow,
             wrist,
-            Some(&smoothed_landmarks)  // Use smoothed landmarks
+            Some(&smoothed_landmarks)
         ) {
             if side == "left" {
                 result.left_gesture = Some(gesture);
@@ -630,41 +639,42 @@ fn process_hand_landmarks(&mut self, hand_landmarks: &[[f64; 3]], hand_index: us
     }
 
 
-    pub fn process_frame(&mut self, frame: &DynamicImage) -> Result<TrackingResult> {
+pub fn process_frame(&mut self, frame: &DynamicImage) -> Result<TrackingResult> {
     let mut result = TrackingResult::default();
     result.timestamp = self.sim_time;
     self.sim_time += 0.033;
     self.frame_counter += 1;
     
     if let Some(ref mut mp) = self.mediapipe {
-        // PROCESS EVERY FRAME - no skipping
         match mp.process_image(frame) {
             Ok(mp_result) => {
                 if mp_result.pose_landmarks.len() > 16 {
                     self.process_pose_with_kalman(&mp_result.pose_landmarks, &mut result);
                     
-                    // Process hands if available
+                    // ALWAYS process hands when detected - remove confidence gate
                     for (i, hand_lms) in mp_result.hand_landmarks.iter().enumerate() {
                         self.process_hand_landmarks(hand_lms, i, &mut result);
                     }
                     
-                   // PERSISTENCE: Use cached hands if not detected this frame
-                        for side in ["left", "right"] {
-                            if !result.hands.contains_key(side) {
-                                if let Some((cached_hand, frames_old)) = self.hand_state_cache.get_mut(side) {
-                                    if *frames_old < 5 {  // Keep cached state for up to 5 frames
+                    // Hand cache logic (only for 1 frame)
+                    for side in ["left", "right"] {
+                        if !result.hands.contains_key(side) {
+                            if let Some((cached_hand, frames_old)) = self.hand_state_cache.get_mut(side) {
+                                if *frames_old < 1 {
+                                    if result.joints.contains_key(&format!("{}_wrist", side)) {
                                         result.hands.insert(side.to_string(), cached_hand.clone());
                                         *frames_old += 1;
-                                        eprintln!("DEBUG: Using cached {} hand (age: {})", side, frames_old);
                                     } else {
-                                        // Too old, remove from cache
                                         self.hand_state_cache.remove(side);
                                     }
+                                } else {
+                                    self.hand_state_cache.remove(side);
                                 }
                             }
                         }
-                        
-                        result.tracking_lost = false;
+                    }
+                    
+                    result.tracking_lost = false;
                 }
             }
             Err(e) => {
