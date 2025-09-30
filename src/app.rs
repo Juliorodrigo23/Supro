@@ -57,6 +57,9 @@ pub struct ArmTrackerApp {
     settings: AppSettings,
 
     current_frame_texture: Option<egui::TextureHandle>,
+
+    #[cfg(target_os = "macos")]
+    pub(crate) macos_icon_set: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +125,8 @@ impl ArmTrackerApp {
         ui_components: UIComponents::new(&cc.egui_ctx),
         settings: AppSettings::default(),
         current_frame_texture: None,    
+        #[cfg(target_os = "macos")]
+        macos_icon_set: false,
     }
 }
     
@@ -689,6 +694,13 @@ fn render_video_file_mode(&mut self, ui: &mut egui::Ui) {
 
 impl eframe::App for ArmTrackerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        
+        #[cfg(target_os = "macos")]
+        if !self.macos_icon_set {
+            // calls the helper we made pub(crate) in main.rs
+            crate::set_macos_dock_icon_from_bundle();
+            self.macos_icon_set = true;
+        }
         // Update recording duration if recording
         if self.is_recording {
             if let Some(start) = self.recording_start {

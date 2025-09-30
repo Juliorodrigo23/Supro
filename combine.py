@@ -19,6 +19,10 @@ from typing import Iterable
 DEFAULT_SRC_DIR = Path("/Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/src")
 DEFAULT_EXCLUDE_DIR = DEFAULT_SRC_DIR / "bin"
 DEFAULT_OUTPUT_FILE = DEFAULT_SRC_DIR / "_all_source.txt"
+DEFAULT_EXTRA_PATHS = [
+    Path("/Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/Cargo.toml"),
+    Path("/Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/build.sh"),
+]
 # -------------------------------------------------------------------------
 
 
@@ -69,11 +73,17 @@ def read_file_as_text(path: Path) -> str:
         return f"<<ERROR READING FILE: {e}>>"
 
 
-def write_combined_output(src_dir: Path, exclude_dir: Path, out_file: Path) -> None:
+def write_combined_output(
+    src_dir: Path,
+    exclude_dir: Path,
+    out_file: Path,
+    extra_paths: Iterable[Path] | None = None,
+) -> None:
     """
     Create (or overwrite) `out_file` containing the concatenated contents of all files
     under `src_dir` except those inside `exclude_dir`. Each file is prefixed by a header
-    showing its relative path, separated with clear boundaries.
+    showing its relative path. If `extra_paths` are provided, append them at the end
+    with absolute-path headers.
     """
     src_dir = src_dir.resolve()
     exclude_dir = exclude_dir.resolve()
@@ -98,22 +108,34 @@ def write_combined_output(src_dir: Path, exclude_dir: Path, out_file: Path) -> N
             out.write("\n")
             count += 1
 
-    print(f"Wrote {count} files into: {out_file}")
+        # --- append extras at the very end ---
+        if extra_paths:
+            out.write("\n")
+            out.write("#" * 80 + "\n")
+            out.write("# EXTRA FILES (appended after source tree)\n")
+            out.write("#" * 80 + "\n\n")
+
+            for xp in extra_paths:
+                xp = Path(xp).resolve()
+                out.write("\n")
+                out.write("=" * 80 + "\n")
+                out.write(f"EXTRA FILE: {xp}\n")
+                out.write("=" * 80 + "\n\n")
+                out.write(read_file_as_text(xp))
+                out.write("\n")
+
+    print(f"Wrote {count} in-tree files + {len(list(extra_paths or []))} extras into: {out_file}")
 
 
 def main() -> None:
     """
     Entry point. You can:
       - Run with no args to use the DEFAULT_* constants at the top, or
-      - Provide 1–3 args:
+      - Provide 1–N args:
             arg1 = src_dir
             arg2 = exclude_dir (defaults to <src_dir>/bin if omitted)
             arg3 = output_file (defaults to <src_dir>/_all_source.txt if omitted)
-
-    Examples:
-        python3 combine_src_to_text.py
-        python3 combine_src_to_text.py "/path/with spaces/src"
-        python3 combine_src_to_text.py "/src" "/src/bin" "/tmp/all.txt"
+            arg4..N = extra file paths to append at end
     """
     argv = sys.argv[1:]
 
@@ -121,12 +143,14 @@ def main() -> None:
         src_dir = DEFAULT_SRC_DIR
         exclude_dir = DEFAULT_EXCLUDE_DIR
         out_file = DEFAULT_OUTPUT_FILE
+        extra_paths = DEFAULT_EXTRA_PATHS
     else:
         src_dir = Path(argv[0])
         exclude_dir = Path(argv[1]) if len(argv) >= 2 else (src_dir / "bin")
         out_file = Path(argv[2]) if len(argv) >= 3 else (src_dir / "_all_source.txt")
+        extra_paths = [Path(p) for p in argv[3:]] if len(argv) >= 4 else DEFAULT_EXTRA_PATHS
 
-    write_combined_output(src_dir, exclude_dir, out_file)
+    write_combined_output(src_dir, exclude_dir, out_file, extra_paths)
 
 
 if __name__ == "__main__":

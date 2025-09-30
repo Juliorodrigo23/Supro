@@ -25,6 +25,8 @@ eframe = "0.24"
 egui = "0.24"
 egui_extras = "0.24"
 image = { version = "0.24", features = ["jpeg", "png"] }
+cocoa = "0.25"
+objc = "0.2"
 
 # Camera support
 nokhwa = { version = "0.10", features = ["input-native", "output-threaded"] }

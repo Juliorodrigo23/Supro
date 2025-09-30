@@ -8,9 +8,46 @@ mod data;
 use eframe::egui;
 use usvg::TreeParsing;
 
+#[cfg(target_os = "macos")]
+pub(crate) fn set_macos_dock_icon_from_bundle() {
+    use cocoa::{
+        appkit::{NSApp, NSImage},
+        base::{id, nil},
+        foundation::NSString,
+    };
+    use objc::{class, msg_send, sel, sel_impl};
+
+    unsafe {
+        // NSBundle *bundle = [NSBundle mainBundle];
+        let bundle: id = msg_send![class!(NSBundle), mainBundle];
+
+        // NSString *name = @"AppIcon"; NSString *typ = @"icns";
+        let name = NSString::alloc(nil).init_str("AppIcon");
+        let typ = NSString::alloc(nil).init_str("icns");
+
+        // NSString *path = [bundle pathForResource:name ofType:typ];
+        let path: id = msg_send![bundle, pathForResource: name ofType: typ];
+        if path != nil {
+            // NSImage *img = [[NSImage alloc] initWithContentsOfFile:path];
+            let img: id = msg_send![NSImage::alloc(nil), initWithContentsOfFile: path];
+            if img != nil {
+                // [NSApp setApplicationIconImage:img];
+                let app = NSApp();
+                let _: () = msg_send![app, setApplicationIconImage: img];
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_macos_dock_icon_from_bundle() {
+    // no-op on non-macOS
+}
+
 fn main() {
     // Initialize logging
     tracing_subscriber::fmt::init();
+    set_macos_dock_icon_from_bundle();
 
     if let Ok(p) = std::env::current_exe() {
         eprintln!("Running from: {}", p.display());
