@@ -365,79 +365,87 @@ impl ArmTracker {
     }
 
     // Add the missing process_hand_landmarks method
-    fn process_hand_landmarks(&mut self, hand_landmarks: &[[f64; 3]], hand_index: usize, result: &mut TrackingResult) {
-        if hand_landmarks.len() < 21 {
-            return;
-        }
-        
-        let landmarks: Vec<Vector3<f64>> = hand_landmarks.iter()
-            .map(|lm| Vector3::new(lm[0], lm[1], lm[2]))
-            .collect();
-        
-        // Determine which hand (simplified - you might want to improve this)
-        let side = if hand_index == 0 { "left" } else { "right" };
-        
-        let wrist_pos = landmarks[0];
+    // Add the missing process_hand_landmarks method
+fn process_hand_landmarks(&mut self, hand_landmarks: &[[f64; 3]], hand_index: usize, result: &mut TrackingResult) {
+    if hand_landmarks.len() < 21 {
+        return;
+    }
+    
+    let landmarks: Vec<Vector3<f64>> = hand_landmarks.iter()
+        .map(|lm| Vector3::new(lm[0], lm[1], lm[2]))
+        .collect();
+    
+    let wrist_pos = landmarks[0];
 
-        let side = if result.joints.contains_key("left_wrist") && 
-                    result.joints.contains_key("right_wrist") {
-            let left_wrist = &result.joints["left_wrist"].position;
-            let right_wrist = &result.joints["right_wrist"].position;
-            
-            let dist_left = (wrist_pos - left_wrist).norm();
-            let dist_right = (wrist_pos - right_wrist).norm();
-            
-            if dist_left < dist_right { "left" } else { "right" }
-        } else {
-            if wrist_pos.x < 0.5 { "left" } else { "right" }
-        };
+    // Determine which hand based on wrist position relative to body center
+    // In camera view: lower x values (< 0.5) are typically on the right side of screen (person's right hand)
+    // higher x values (> 0.5) are typically on the left side of screen (person's left hand)
+    // BUT from the person's perspective facing the camera, it's the opposite
+    
+    let side = if result.joints.contains_key("left_wrist") && 
+                result.joints.contains_key("right_wrist") {
+        // If we have arm joints, match to closest wrist
+        let left_wrist = &result.joints["left_wrist"].position;
+        let right_wrist = &result.joints["right_wrist"].position;
         
-        eprintln!("DEBUG: Hand {} assigned to {} side (confidence check)", hand_index, side);
+        let dist_left = (wrist_pos - left_wrist).norm();
+        let dist_right = (wrist_pos - right_wrist).norm();
+        
+        if dist_left < dist_right { "left" } else { "right" }
+    } else {
+        // Fallback: use x-position
+        // Camera view: x < 0.5 is right side of screen (person's RIGHT hand)
+        //              x > 0.5 is left side of screen (person's LEFT hand)
+        // Since the person is facing the camera, we need to flip this
+        if wrist_pos.x < 0.5 { "right" } else { "left" }
+    };
+    
+    eprintln!("DEBUG: Hand {} at x={:.2} assigned to {} side", hand_index, wrist_pos.x, side);
 
-        let filters = self.get_or_create_hand_filters(side);
-        let mut smoothed_landmarks = Vec::new();
-        
-        for (i, lm) in hand_landmarks.iter().enumerate() {
-            let measurement = Vector3::new(lm[0], lm[1], lm[2]);
-            filters[i].predict();
-            filters[i].update(measurement);
-            smoothed_landmarks.push(filters[i].position());
-        }
+    let filters = self.get_or_create_hand_filters(side);
+    let mut smoothed_landmarks = Vec::new();
+    
+    for (i, lm) in hand_landmarks.iter().enumerate() {
+        let measurement = Vector3::new(lm[0], lm[1], lm[2]);
+        filters[i].predict();
+        filters[i].update(measurement);
+        smoothed_landmarks.push(filters[i].position());
+    }
 
-        let hand_state = HandState {
-            landmarks: landmarks.clone(),
-            confidences: vec![1.0; landmarks.len()], // MediaPipe doesn't provide per-landmark confidence
-            is_tracked: true,
-        };
-        
-        self.hand_state_cache.insert(side.to_string(), (hand_state.clone(), 0));
-        result.hands.insert(side.to_string(), hand_state);
+    let hand_state = HandState {
+        landmarks: smoothed_landmarks.clone(),  // Use smoothed landmarks
+        confidences: vec![1.0; smoothed_landmarks.len()],
+        is_tracked: true,
+    };
+    
+    self.hand_state_cache.insert(side.to_string(), (hand_state.clone(), 0));
+    result.hands.insert(side.to_string(), hand_state);
 
+    
+    // Calculate gesture if we have arm joints
+    if result.joints.contains_key(&format!("{}_shoulder", side)) &&
+       result.joints.contains_key(&format!("{}_elbow", side)) &&
+       result.joints.contains_key(&format!("{}_wrist", side)) {
         
-        // Calculate gesture if we have arm joints
-        if result.joints.contains_key(&format!("{}_shoulder", side)) &&
-           result.joints.contains_key(&format!("{}_elbow", side)) &&
-           result.joints.contains_key(&format!("{}_wrist", side)) {
-            
-            let shoulder = &result.joints[&format!("{}_shoulder", side)].position;
-            let elbow = &result.joints[&format!("{}_elbow", side)].position;
-            let wrist = &result.joints[&format!("{}_wrist", side)].position;
-            
-            if let Some(gesture) = self.calculate_arm_rotation_enhanced(
-                side,
-                shoulder,
-                elbow,
-                wrist,
-                Some(&landmarks)
-            ) {
-                if side == "left" {
-                    result.left_gesture = Some(gesture);
-                } else {
-                    result.right_gesture = Some(gesture);
-                }
+        let shoulder = &result.joints[&format!("{}_shoulder", side)].position;
+        let elbow = &result.joints[&format!("{}_elbow", side)].position;
+        let wrist = &result.joints[&format!("{}_wrist", side)].position;
+        
+        if let Some(gesture) = self.calculate_arm_rotation_enhanced(
+            side,
+            shoulder,
+            elbow,
+            wrist,
+            Some(&smoothed_landmarks)  // Use smoothed landmarks
+        ) {
+            if side == "left" {
+                result.left_gesture = Some(gesture);
+            } else {
+                result.right_gesture = Some(gesture);
             }
         }
     }
+}
 
     pub fn process_frame_with_metrics(&mut self, frame: &DynamicImage) -> Result<(TrackingResult, PerformanceMetrics)> {
         let start = Instant::now();
