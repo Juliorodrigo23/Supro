@@ -103,6 +103,12 @@ echo "Verifying keys..."
 ls -l "$RES/AppIcon.icns" || true
 echo ""
 
+# After creating the bundle, copy Python files
+PYTHON_DIR="$APP/Contents/Resources/python"
+mkdir -p "$PYTHON_DIR"
+cp -r python/*.py "$PYTHON_DIR/"
+echo "Copied Python scripts to bundle"
+
 # Replace old app in /Applications to avoid duplicate cache entries
 DEST="/Applications/Arm Tracker.app"
 if [[ -d "$DEST" ]]; then

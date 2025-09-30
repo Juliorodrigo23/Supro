@@ -4,6 +4,7 @@ mod tracking;
 mod ui;
 mod video;
 mod data;
+mod mediapipe_bridge;
 
 use eframe::egui;
 use usvg::TreeParsing;

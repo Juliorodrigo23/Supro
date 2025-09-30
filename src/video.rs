@@ -24,20 +24,31 @@ pub struct VideoInfo {
 
 impl VideoSource {
     pub fn new_camera(index: i32) -> Result<Self> {
-    eprintln!("DEBUG: Attempting to open camera index {}", index);
-    
-    let camera_index = CameraIndex::Index(index as u32);
-    let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
-    
-    eprintln!("DEBUG: Creating camera object...");
-    let camera = Camera::new(camera_index, requested)
-        .map_err(|e| {
-            eprintln!("DEBUG: Failed to create camera: {}", e);
-            anyhow::anyhow!("Failed to open camera: {}", e)
-        })?;
-    
-    eprintln!("DEBUG: Camera created successfully");
-    Ok(VideoSource::Camera(Arc::new(Mutex::new(camera))))
+        eprintln!("DEBUG: Attempting to open camera index {}", index);
+        
+        let camera_index = CameraIndex::Index(index as u32);
+        
+        // Create a CameraFormat with the desired settings
+        use nokhwa::utils::{CameraFormat, FrameFormat, Resolution};
+        
+        let format = CameraFormat::new(
+            Resolution::new(640, 480),
+            FrameFormat::MJPEG,  // or FrameFormat::YUYV
+            30,  // frame rate
+        );
+        
+        // Use the Exact variant with the CameraFormat
+        let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Exact(format));
+        
+        eprintln!("DEBUG: Creating camera object...");
+        let camera = Camera::new(camera_index, requested)
+            .map_err(|e| {
+                eprintln!("DEBUG: Failed to create camera: {}", e);
+                anyhow::anyhow!("Failed to open camera: {}", e)
+            })?;
+        
+        eprintln!("DEBUG: Camera created successfully");
+        Ok(VideoSource::Camera(Arc::new(Mutex::new(camera))))
     }
     
     pub fn new_file(path: impl AsRef<Path>) -> Result<Self> {

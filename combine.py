@@ -22,6 +22,8 @@ DEFAULT_OUTPUT_FILE = DEFAULT_SRC_DIR / "_all_source.txt"
 DEFAULT_EXTRA_PATHS = [
     Path("/Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/Cargo.toml"),
     Path("/Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/build.sh"),
+    Path("/Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/python/mediapipe_service.py"),
+    Path("/Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/python/mediapipe_processor.py"),
 ]
 # -------------------------------------------------------------------------
 
