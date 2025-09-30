@@ -6,22 +6,43 @@ mod video;
 mod data;
 
 use eframe::egui;
+use usvg::TreeParsing;
 
 fn main() {
     // Initialize logging
     tracing_subscriber::fmt::init();
 
+    if let Ok(p) = std::env::current_exe() {
+        eprintln!("Running from: {}", p.display());
+    }
+
+    // DEBUG: List all available cameras
+    println!("=== Camera Detection Debug ===");
+    match nokhwa::query(nokhwa::utils::ApiBackend::Auto) {
+        Ok(cameras) => {
+            println!("Found {} camera(s):", cameras.len());
+            for (i, camera) in cameras.iter().enumerate() {
+                println!("  [{}] {}", i, camera.human_name());
+            }
+        }
+        Err(e) => {
+            println!("Failed to query cameras: {}", e);
+        }
+    }
+    println!("============================\n");
+
+
+
     // Set up GUI options
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1400.0, 900.0])
-            .with_min_inner_size([1200.0, 800.0])
-            .with_icon(load_icon()),
+            .with_min_inner_size([1200.0, 800.0]),
         centered: true,
         ..Default::default()
     };
 
-    // Run the application (don't use ? operator with eframe)
+    // Run the application
     let result = eframe::run_native(
         "Arm Rotation Tracking System",
         options,
@@ -40,22 +61,46 @@ fn main() {
     }
 }
 
-fn load_icon() -> egui::IconData {
-    // Create a default icon if no icon file exists
-    let icon_data = vec![255u8; 64 * 64 * 4]; // White 64x64 RGBA image
+
+
+fn load_svg_as_rgba(path: &str, size: u32) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let svg_data = std::fs::read_to_string(path)?;
+    let opt = usvg::Options::default();
+    let tree = usvg::Tree::from_str(&svg_data, &opt)?;
     
-    egui::IconData {
-        rgba: icon_data,
-        width: 64,
-        height: 64,
-    }
+    // Use resvg's re-exported tiny_skia types
+    let pixmap_size = tree.size.to_int_size();
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(size, size).unwrap();
+    
+    let scale = size as f32 / pixmap_size.width().max(pixmap_size.height()) as f32;
+    let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+    
+    // Use the Tree's render method directly with consistent types
+    resvg::Tree::from_usvg(&tree).render(transform, &mut pixmap.as_mut());
+    
+    Ok(pixmap.data().to_vec())
 }
 
 fn configure_fonts(ctx: &egui::Context) {
-    let fonts = egui::FontDefinitions::default();
+    let mut fonts = egui::FontDefinitions::default();
     
-    // Use the default fonts for now
-    // You can add custom fonts later
+    // Load Montserrat font
+    let font_path = "/Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/fonts/Montserrat-VariableFont_wght.ttf";
+    if let Ok(font_data) = std::fs::read(font_path) {
+        fonts.font_data.insert(
+            "Montserrat".to_owned(),
+            egui::FontData::from_owned(font_data),
+        );
+        
+        // Set Montserrat as the primary font
+        fonts.families.entry(egui::FontFamily::Proportional)
+            .or_default()
+            .insert(0, "Montserrat".to_owned());
+            
+        fonts.families.entry(egui::FontFamily::Monospace)
+            .or_default()
+            .push("Montserrat".to_owned());
+    }
     
     ctx.set_fonts(fonts);
 }

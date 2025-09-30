@@ -1,10 +1,14 @@
-// src/video.rs - Working version without OpenCV
+// src/video.rs - Fixed version
 use std::path::{Path, PathBuf};
-use anyhow::{Result, Context};
-use image::{DynamicImage, RgbaImage};
+use anyhow::Result;
+use image::{DynamicImage, ImageBuffer};
+use nokhwa::pixel_format::RgbFormat;
+use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
+use nokhwa::Camera;
+use std::sync::{Arc, Mutex};
 
 pub enum VideoSource {
-    Camera(usize),
+    Camera(Arc<Mutex<Camera>>),
     File(PathBuf, VideoInfo),
 }
 
@@ -20,9 +24,20 @@ pub struct VideoInfo {
 
 impl VideoSource {
     pub fn new_camera(index: i32) -> Result<Self> {
-        // For now, just store the camera index
-        // In production, you'd integrate with a camera library
-        Ok(VideoSource::Camera(index as usize))
+    eprintln!("DEBUG: Attempting to open camera index {}", index);
+    
+    let camera_index = CameraIndex::Index(index as u32);
+    let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
+    
+    eprintln!("DEBUG: Creating camera object...");
+    let camera = Camera::new(camera_index, requested)
+        .map_err(|e| {
+            eprintln!("DEBUG: Failed to create camera: {}", e);
+            anyhow::anyhow!("Failed to open camera: {}", e)
+        })?;
+    
+    eprintln!("DEBUG: Camera created successfully");
+    Ok(VideoSource::Camera(Arc::new(Mutex::new(camera))))
     }
     
     pub fn new_file(path: impl AsRef<Path>) -> Result<Self> {
@@ -39,24 +54,65 @@ impl VideoSource {
     }
     
     pub fn read_frame(&mut self) -> Result<DynamicImage> {
-        // Create a test pattern for demo
-        let mut img = RgbaImage::new(1280, 720);
-        
-        // Generate a gradient pattern
-        for (x, y, pixel) in img.enumerate_pixels_mut() {
-            let r = (x as f32 / 1280.0 * 255.0) as u8;
-            let g = (y as f32 / 720.0 * 255.0) as u8;
-            let b = 128;
-            *pixel = image::Rgba([r, g, b, 255]);
+        match self {
+            VideoSource::Camera(camera) => {
+                let mut cam = camera.lock().unwrap();
+                
+                // Open stream if not already open
+                if !cam.is_stream_open() {
+                    cam.open_stream()
+                        .map_err(|e| anyhow::anyhow!("Failed to open camera stream: {}", e))?;
+                }
+                
+                // Capture frame
+                let frame = cam.frame()
+                    .map_err(|e| anyhow::anyhow!("Failed to capture frame: {}", e))?;
+                
+                // Get frame data
+                let decoded = frame.decode_image::<RgbFormat>()
+                    .map_err(|e| anyhow::anyhow!("Failed to decode frame: {}", e))?;
+                
+                // Convert to DynamicImage
+                let width = decoded.width();
+                let height = decoded.height();
+                let rgb_data = decoded.into_vec();  // Changed from into_flat_vec()
+                
+                // Convert RGB to RGBA
+                let mut rgba_data = Vec::with_capacity((width * height * 4) as usize);
+                for chunk in rgb_data.chunks(3) {
+                    rgba_data.push(chunk[0]);
+                    rgba_data.push(chunk[1]);
+                    rgba_data.push(chunk[2]);
+                    rgba_data.push(255);
+                }
+                
+                let img = ImageBuffer::from_raw(width, height, rgba_data)
+                    .ok_or_else(|| anyhow::anyhow!("Failed to create image buffer"))?;
+                
+                Ok(DynamicImage::ImageRgba8(img))
+            }
+            VideoSource::File(_, _) => {
+                // For file playback, return a placeholder for now
+                Ok(DynamicImage::new_rgba8(1280, 720))
+            }
         }
-        
-        Ok(DynamicImage::ImageRgba8(img))
     }
     
-    pub fn get_info(&self) -> Option<&VideoInfo> {
+    pub fn get_info(&self) -> Option<VideoInfo> {
         match self {
-            VideoSource::File(_, info) => Some(info),
-            _ => None,
+            VideoSource::Camera(camera) => {
+                let cam = camera.lock().unwrap();
+                let resolution = cam.resolution();
+                Some(VideoInfo {
+                    path: PathBuf::from("camera://0"),
+                    fps: cam.frame_rate() as f64,
+                    frame_count: -1, // Infinite for camera
+                    width: resolution.width() as i32,
+                    height: resolution.height() as i32,
+                    current_frame: 0,
+                })
+            }
+            VideoSource::File(_, info) => Some(info.clone()),
         }
     }
     
@@ -65,6 +121,16 @@ impl VideoSource {
             info.current_frame = frame_number;
         }
         Ok(())
+    }
+}
+
+impl Drop for VideoSource {
+    fn drop(&mut self) {
+        if let VideoSource::Camera(camera) = self {
+            if let Ok(mut cam) = camera.lock() {
+                let _ = cam.stop_stream();
+            }
+        }
     }
 }
 

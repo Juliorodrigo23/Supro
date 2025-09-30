@@ -26,7 +26,7 @@ pub enum ViewMode {
 pub struct ArmTrackerApp {
     // Core components
     tracker: Arc<Mutex<ArmTracker>>,
-    video_source: VideoSource,
+    video_source: Option<VideoSource>,
     recorder: Option<VideoRecorder>,
     
     // UI State
@@ -55,6 +55,8 @@ pub struct ArmTrackerApp {
     
     // Settings
     settings: AppSettings,
+
+    current_frame_texture: Option<egui::TextureHandle>,
 }
 
 #[derive(Debug, Clone)]
@@ -96,32 +98,102 @@ impl Default for AppSettings {
 
 impl ArmTrackerApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // Initialize components
-        let tracker = Arc::new(Mutex::new(ArmTracker::new().expect("Failed to initialize tracker")));
-        let video_source = VideoSource::new_camera(0).expect("Failed to open camera");
-        
-        Self {
-            tracker,
-            video_source,
-            recorder: None,
-            mode: AppMode::Live,
-            view_mode: ViewMode::DualView,
-            theme: Theme::default(),
-            show_settings: false,
-            show_about: false,
-            is_recording: false,
-            recording_start: None,
-            recording_duration: std::time::Duration::ZERO,
-            current_result: TrackingResult::default(),
-            tracking_history: Vec::new(),
-            selected_video: None,
-            video_progress: 0.0,
-            is_playing: true,
-            ui_components: UIComponents::new(&cc.egui_ctx),
-            settings: AppSettings::default(),
+    let tracker = Arc::new(Mutex::new(
+        ArmTracker::new().expect("Failed to initialize tracker")
+    ));
+
+    Self {
+        tracker,
+        video_source: None,                 // << lazy init
+        recorder: None,
+        mode: AppMode::Live,
+        view_mode: ViewMode::DualView,
+        theme: Theme::default(),
+        show_settings: false,
+        show_about: false,
+        is_recording: false,
+        recording_start: None,
+        recording_duration: std::time::Duration::ZERO,
+        current_result: TrackingResult::default(),
+        tracking_history: Vec::new(),
+        selected_video: None,
+        video_progress: 0.0,
+        is_playing: true,
+        ui_components: UIComponents::new(&cc.egui_ctx),
+        settings: AppSettings::default(),
+        current_frame_texture: None,    
+    }
+}
+    
+    fn stop_camera(&mut self) {
+        self.video_source = None;
+        self.current_frame_texture = None;
+        eprintln!("Camera stopped");
+    }
+
+   fn start_camera(&mut self) {
+    // If already open, just probe a frame
+    if let Some(src) = self.video_source.as_mut() {
+        if let Err(e) = src.read_frame() {
+            eprintln!("Camera already open but failed to read frame: {e}");
+        } else {
+            eprintln!("Camera already running.");
+        }
+        return;
+    }
+
+    // Try to open camera now (after UI exists, Info.plist present in bundle)
+    match VideoSource::new_camera(0) {
+        Ok(mut src) => {
+            // Probe one frame to ensure the pipeline is live.
+            match src.read_frame() {
+                Ok(frame) => {
+                    eprintln!("Camera started: {}x{}", frame.width(), frame.height());
+                    self.video_source = Some(src);
+                }
+                Err(e) => {
+                    eprintln!("Camera opened but failed to read first frame: {e}");
+                }
+            }
+        }
+        Err(e) => {
+            // Don’t crash the app; show a friendly message in logs/UI
+            eprintln!(
+                "Failed to open camera: {e}\n\
+                 Tip: On macOS you must run the bundled app so TCC can prompt, \
+                 and ensure Info.plist includes NSCameraUsageDescription."
+            );
         }
     }
+}
+
+    fn on_mode_changed(&mut self, old_mode: AppMode, new_mode: AppMode) {
+    eprintln!("Mode changed from {:?} to {:?}", old_mode, new_mode);
     
+    match new_mode {
+        AppMode::Live => {
+            // When switching to Live mode, stop any video file playback
+            // Camera will be started when user clicks "Start Camera"
+            eprintln!("Switched to Live Camera mode");
+        }
+        AppMode::VideoFile => {
+            // Stop camera if running
+            if self.video_source.is_some() {
+                self.stop_camera();
+            }
+            eprintln!("Switched to Video File mode");
+            // TODO: Open file picker for video file selection
+        }
+        AppMode::Playback => {
+            // Stop camera if running
+            if self.video_source.is_some() {
+                self.stop_camera();
+            }
+            eprintln!("Switched to Playback/Analysis mode");
+        }
+    }
+}
+
     fn render_header(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(10.0);
@@ -138,9 +210,16 @@ impl ArmTrackerApp {
                 
                 // Mode selection
                 ui.horizontal(|ui| {
+                    let old_mode = self.mode;
+                    
                     ui.selectable_value(&mut self.mode, AppMode::Live, "🎥 Live Camera");
                     ui.selectable_value(&mut self.mode, AppMode::VideoFile, "📁 Video File");
                     ui.selectable_value(&mut self.mode, AppMode::Playback, "📊 Analysis");
+                    
+                    // Handle mode changes
+                    if self.mode != old_mode {
+                        self.on_mode_changed(old_mode, self.mode);
+                    }
                 });
                 
                 ui.separator();
@@ -186,14 +265,63 @@ impl ArmTrackerApp {
     }
     
     fn render_main_content(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            match self.view_mode {
-                ViewMode::SingleCamera => self.render_single_view(ui),
-                ViewMode::DualView => self.render_dual_view(ui),
-                ViewMode::DataAnalysis => self.render_analysis_view(ui),
+    egui::CentralPanel::default().show(ctx, |ui| {
+        match self.mode {
+            AppMode::Live => {
+                match self.view_mode {
+                    ViewMode::SingleCamera => self.render_single_view(ui),
+                    ViewMode::DualView => self.render_dual_view(ui),
+                    ViewMode::DataAnalysis => self.render_analysis_view(ui),
+                }
             }
-        });
-    }
+            AppMode::VideoFile => {
+                self.render_video_file_mode(ui);
+            }
+            AppMode::Playback => {
+                self.render_analysis_view(ui);
+            }
+        }
+    });
+}
+
+fn render_video_file_mode(&mut self, ui: &mut egui::Ui) {
+    ui.vertical_centered(|ui| {
+        ui.add_space(50.0);
+        ui.heading("Video File Mode");
+        ui.add_space(20.0);
+        
+        if let Some(path) = &self.selected_video {
+            ui.label(format!("Selected: {}", path.display()));
+            ui.add_space(10.0);
+            
+            // Video playback controls would go here
+            ui.horizontal(|ui| {
+                if ui.button(if self.is_playing { "⏸ Pause" } else { "▶ Play" }).clicked() {
+                    self.is_playing = !self.is_playing;
+                }
+                
+                ui.add(egui::Slider::new(&mut self.video_progress, 0.0..=100.0)
+                    .text("Progress")
+                    .suffix("%"));
+            });
+            
+            ui.add_space(20.0);
+            
+            // Video display
+            self.render_video_panel(ui, true);
+        } else {
+            ui.label("No video file selected");
+            ui.add_space(20.0);
+            
+            if ui.button("📁 Select Video File").clicked() {
+                // TODO: Open file picker
+                eprintln!("File picker not yet implemented");
+                // For now, show a message
+                ui.label("File picker coming soon...");
+            }
+        }
+    });
+}
     
     fn render_single_view(&mut self, ui: &mut egui::Ui) {
         ui.columns(2, |columns| {
@@ -300,21 +428,27 @@ impl ArmTrackerApp {
     }
     
     fn render_video_panel(&mut self, ui: &mut egui::Ui, with_overlay: bool) {
-        // Video display area
-        let available_size = ui.available_size();
-        let texture_size = egui::vec2(available_size.x - 20.0, available_size.y - 100.0);
+    let available_size = ui.available_size();
+    
+    if let Some(texture_id) = self.get_current_frame_texture(with_overlay) {
+        // Calculate aspect ratio to maintain proper display
+        let aspect_ratio = 16.0 / 9.0; // Adjust based on your camera
+        let display_width = available_size.x - 20.0;
+        let display_height = display_width / aspect_ratio;
         
-        // Render video frame
-        if let Some(frame_texture) = self.get_current_frame_texture(with_overlay) {
-            ui.centered_and_justified(|ui| {
-                ui.image((frame_texture, texture_size));
-            });
-        } else {
-            ui.centered_and_justified(|ui| {
-                ui.label("No video feed available");
-            });
-        }
+        ui.centered_and_justified(|ui| {
+            ui.image(egui::load::SizedTexture::new(
+                texture_id,
+                egui::vec2(display_width, display_height)
+            ));
+        });
+    } else {
+        ui.centered_and_justified(|ui| {
+            ui.label("No video feed available");
+            ui.label("Click 'Start Camera' to begin");
+        });
     }
+}
     
     fn render_gesture_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
@@ -440,10 +574,34 @@ impl ArmTrackerApp {
     }
     
     fn render_control_panel(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::bottom("controls").show(ctx, |ui| {
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                // Record button
+    egui::TopBottomPanel::bottom("controls").show(ctx, |ui| {
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            // Only show camera controls in Live mode
+            if self.mode == AppMode::Live {
+                if self.video_source.is_some() {
+                    if ui.add_sized(
+                        [120.0, 40.0],
+                        egui::Button::new("⏹ Stop Camera")
+                            .fill(egui::Color32::from_rgb(244, 67, 54))
+                    ).clicked() {
+                        self.stop_camera();
+                    }
+                } else {
+                    if ui.add_sized(
+                        [120.0, 40.0],
+                        egui::Button::new("📷 Start Camera")
+                            .fill(egui::Color32::from_rgb(33, 150, 243))
+                    ).clicked() {
+                        self.start_camera();
+                    }
+                }
+                
+                ui.separator();
+            }
+            
+            // Record button (only in Live or VideoFile mode)
+            if self.mode != AppMode::Playback {
                 let record_btn = if self.is_recording {
                     ui.add_sized(
                         [120.0, 40.0],
@@ -463,40 +621,43 @@ impl ArmTrackerApp {
                 }
                 
                 ui.separator();
-                
-                // Playback controls for video mode
-                if self.mode == AppMode::VideoFile {
-                    if ui.button(if self.is_playing { "⏸" } else { "▶" }).clicked() {
-                        self.is_playing = !self.is_playing;
-                    }
-                    
-                    ui.add(egui::Slider::new(&mut self.video_progress, 0.0..=100.0)
-                        .text("Progress")
-                        .suffix("%"));
+            }
+            
+            // Playback controls for video mode
+            if self.mode == AppMode::VideoFile {
+                if ui.button(if self.is_playing { "⏸" } else { "▶" }).clicked() {
+                    self.is_playing = !self.is_playing;
                 }
                 
-                ui.separator();
+                ui.add(egui::Slider::new(&mut self.video_progress, 0.0..=100.0)
+                    .text("Progress")
+                    .suffix("%"));
                 
-                // Arm toggles
+                ui.separator();
+            }
+            
+            // Arm toggles (only in Live mode)
+            if self.mode == AppMode::Live {
                 ui.checkbox(&mut self.settings.enable_left_arm, "Left Arm");
                 ui.checkbox(&mut self.settings.enable_right_arm, "Right Arm");
                 ui.checkbox(&mut self.settings.enable_fingers, "Fingers");
-                
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if self.is_recording {
-                        let duration = self.recording_duration;
-                        let minutes = duration.as_secs() / 60;
-                        let seconds = duration.as_secs() % 60;
-                        ui.label(
-                            egui::RichText::new(format!("Recording: {:02}:{:02}", minutes, seconds))
-                                .color(egui::Color32::from_rgb(244, 67, 54))
-                        );
-                    }
-                });
+            }
+            
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.is_recording {
+                    let duration = self.recording_duration;
+                    let minutes = duration.as_secs() / 60;
+                    let seconds = duration.as_secs() % 60;
+                    ui.label(
+                        egui::RichText::new(format!("Recording: {:02}:{:02}", minutes, seconds))
+                            .color(egui::Color32::from_rgb(244, 67, 54))
+                    );
+                }
             });
-            ui.add_space(10.0);
         });
-    }
+        ui.add_space(10.0);
+    });
+}
     
     fn toggle_recording(&mut self) {
         self.is_recording = !self.is_recording;
@@ -514,8 +675,7 @@ impl ArmTrackerApp {
     }
     
     fn get_current_frame_texture(&self, _with_overlay: bool) -> Option<egui::TextureId> {
-        // Implementation to get current video frame as texture
-        None
+        self.current_frame_texture.as_ref().map(|t| t.id())
     }
     
     fn export_data_to_csv(&self) {
@@ -539,24 +699,50 @@ impl eframe::App for ArmTrackerApp {
             }
         }
         
+                if let Some(video_source) = self.video_source.as_mut() {
+            match video_source.read_frame() {
+                Ok(frame) => {
+                    // Convert DynamicImage to egui texture
+                    let size = [frame.width() as usize, frame.height() as usize];
+                    let rgba = frame.to_rgba8();
+                    let pixels = rgba.as_flat_samples();
+                    
+                    let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                        size,
+                        pixels.as_slice(),
+                    );
+                    
+                    // Update or create texture
+                    if let Some(texture) = &mut self.current_frame_texture {
+                        texture.set(color_image, Default::default());
+                    } else {
+                        self.current_frame_texture = Some(ctx.load_texture(
+                            "video_frame",
+                            color_image,
+                            Default::default(),
+                        ));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to read frame: {}", e);
+                }
+            }
+        }
+
         // Render UI components
         self.render_header(ctx);
         self.render_control_panel(ctx);
         
-        // Settings window
         if self.show_settings {
             self.render_settings_window(ctx);
         }
         
-        // About window
         if self.show_about {
             self.render_about_window(ctx);
         }
         
-        // Main content
         self.render_main_content(ctx);
         
-        // Request repaint for continuous updates
         ctx.request_repaint();
     }
 }
@@ -621,7 +807,7 @@ impl ArmTrackerApp {
                     ui.label("A sophisticated motion tracking application");
                     ui.label("for analyzing arm rotation patterns.");
                     ui.add_space(20.0);
-                    ui.hyperlink("https://github.com/yourusername/arm-tracker");
+                    ui.hyperlink("https://github.com/Juliorodrigo23/Supro");
                 });
             });
     }

@@ -1,6 +1,7 @@
-// src/ui.rs
+// src/ui.rs - Fixed to use resvg's re-exported tiny_skia
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
 use image::DynamicImage;
+use usvg::TreeParsing;
 
 #[derive(Debug, Clone)]
 pub struct Theme {
@@ -51,15 +52,13 @@ impl UIComponents {
             animations: AnimationState::default(),
         };
         
-        // Try to load logo texture
-        if let Ok(logo_image) = load_logo_image() {
-            let size = [logo_image.width() as _, logo_image.height() as _];
-            let rgba = logo_image.to_rgba8();
-            let pixels = rgba.as_flat_samples();
-            
+        // Try to load SVG logo
+        let logo_path = "/Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/assets/supro.svg";
+        if let Ok(logo_rgba) = load_svg_as_rgba(logo_path, 256) {
+            let size = [256, 256];
             let color_image = egui::ColorImage::from_rgba_unmultiplied(
                 size,
-                pixels.as_slice(),
+                &logo_rgba,
             );
             
             components.logo_texture = Some(ctx.load_texture(
@@ -286,8 +285,26 @@ fn draw_arc(
     }
 }
 
+fn load_svg_as_rgba(path: &str, size: u32) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let svg_data = std::fs::read_to_string(path)?;
+    let opt = usvg::Options::default();
+    let tree = usvg::Tree::from_str(&svg_data, &opt)?;
+    
+    // Use resvg's re-exported tiny_skia types
+    let pixmap_size = tree.size.to_int_size();
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(size, size).unwrap();
+    
+    let scale = size as f32 / pixmap_size.width().max(pixmap_size.height()) as f32;
+    let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+    
+    // Use the Tree's render method directly with consistent types
+    resvg::Tree::from_usvg(&tree).render(transform, &mut pixmap.as_mut());
+    
+    Ok(pixmap.data().to_vec())
+}
+
 fn load_logo_image() -> Result<DynamicImage, image::ImageError> {
-    // For now, create a dummy image
+    // This is now a fallback
     Ok(DynamicImage::new_rgba8(128, 128))
 }
 

@@ -1,0 +1,2084 @@
+# Combined dump of /Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/src
+# Excluding: /Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/src/bin
+
+
+================================================================================
+FILE: _all_source.txt
+================================================================================
+
+
+
+================================================================================
+FILE: app.rs
+================================================================================
+
+// src/app.rs
+use crate::tracking::{ArmTracker, TrackingResult, GestureType};
+use crate::ui::{Theme, UIComponents};
+use crate::video::{VideoSource, VideoRecorder};
+use crate::data::DataExporter;
+
+use eframe::egui;
+use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use chrono::{DateTime, Local};
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AppMode {
+    Live,
+    VideoFile,
+    Playback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ViewMode {
+    SingleCamera,
+    DualView,
+    DataAnalysis,
+}
+
+pub struct ArmTrackerApp {
+    // Core components
+    tracker: Arc<Mutex<ArmTracker>>,
+    video_source: Option<VideoSource>,
+    recorder: Option<VideoRecorder>,
+    
+    // UI State
+    mode: AppMode,
+    view_mode: ViewMode,
+    theme: Theme,
+    show_settings: bool,
+    show_about: bool,
+    
+    // Recording state
+    is_recording: bool,
+    recording_start: Option<DateTime<Local>>,
+    recording_duration: std::time::Duration,
+    
+    // Tracking data
+    current_result: TrackingResult,
+    tracking_history: Vec<TrackingResult>,
+    
+    // Video processing
+    selected_video: Option<PathBuf>,
+    video_progress: f32,
+    is_playing: bool,
+    
+    // UI Components
+    ui_components: UIComponents,
+    
+    // Settings
+    settings: AppSettings,
+
+    current_frame_texture: Option<egui::TextureHandle>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AppSettings {
+    pub enable_left_arm: bool,
+    pub enable_right_arm: bool,
+    pub enable_fingers: bool,
+    pub confidence_threshold: f32,
+    pub smoothing_factor: f32,
+    pub auto_save: bool,
+    pub output_directory: PathBuf,
+    pub video_quality: VideoQuality,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VideoQuality {
+    Low,
+    Medium,
+    High,
+    Ultra,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            enable_left_arm: true,
+            enable_right_arm: true,
+            enable_fingers: true,
+            confidence_threshold: 0.6,
+            smoothing_factor: 0.7,
+            auto_save: true,
+            output_directory: directories::UserDirs::new()
+                .and_then(|dirs| dirs.document_dir().map(|p| p.join("ArmTracker")))
+                .unwrap_or_else(|| PathBuf::from("./output")),
+            video_quality: VideoQuality::High,
+        }
+    }
+}
+
+impl ArmTrackerApp {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    let tracker = Arc::new(Mutex::new(
+        ArmTracker::new().expect("Failed to initialize tracker")
+    ));
+
+    Self {
+        tracker,
+        video_source: None,                 // << lazy init
+        recorder: None,
+        mode: AppMode::Live,
+        view_mode: ViewMode::DualView,
+        theme: Theme::default(),
+        show_settings: false,
+        show_about: false,
+        is_recording: false,
+        recording_start: None,
+        recording_duration: std::time::Duration::ZERO,
+        current_result: TrackingResult::default(),
+        tracking_history: Vec::new(),
+        selected_video: None,
+        video_progress: 0.0,
+        is_playing: true,
+        ui_components: UIComponents::new(&cc.egui_ctx),
+        settings: AppSettings::default(),
+        current_frame_texture: None,    
+    }
+}
+    
+    fn stop_camera(&mut self) {
+        self.video_source = None;
+        self.current_frame_texture = None;
+        eprintln!("Camera stopped");
+    }
+
+   fn start_camera(&mut self) {
+    // If already open, just probe a frame
+    if let Some(src) = self.video_source.as_mut() {
+        if let Err(e) = src.read_frame() {
+            eprintln!("Camera already open but failed to read frame: {e}");
+        } else {
+            eprintln!("Camera already running.");
+        }
+        return;
+    }
+
+    // Try to open camera now (after UI exists, Info.plist present in bundle)
+    match VideoSource::new_camera(0) {
+        Ok(mut src) => {
+            // Probe one frame to ensure the pipeline is live.
+            match src.read_frame() {
+                Ok(frame) => {
+                    eprintln!("Camera started: {}x{}", frame.width(), frame.height());
+                    self.video_source = Some(src);
+                }
+                Err(e) => {
+                    eprintln!("Camera opened but failed to read first frame: {e}");
+                }
+            }
+        }
+        Err(e) => {
+            // Don’t crash the app; show a friendly message in logs/UI
+            eprintln!(
+                "Failed to open camera: {e}\n\
+                 Tip: On macOS you must run the bundled app so TCC can prompt, \
+                 and ensure Info.plist includes NSCameraUsageDescription."
+            );
+        }
+    }
+}
+
+    fn on_mode_changed(&mut self, old_mode: AppMode, new_mode: AppMode) {
+    eprintln!("Mode changed from {:?} to {:?}", old_mode, new_mode);
+    
+    match new_mode {
+        AppMode::Live => {
+            // When switching to Live mode, stop any video file playback
+            // Camera will be started when user clicks "Start Camera"
+            eprintln!("Switched to Live Camera mode");
+        }
+        AppMode::VideoFile => {
+            // Stop camera if running
+            if self.video_source.is_some() {
+                self.stop_camera();
+            }
+            eprintln!("Switched to Video File mode");
+            // TODO: Open file picker for video file selection
+        }
+        AppMode::Playback => {
+            // Stop camera if running
+            if self.video_source.is_some() {
+                self.stop_camera();
+            }
+            eprintln!("Switched to Playback/Analysis mode");
+        }
+    }
+}
+
+    fn render_header(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("header").show(ctx, |ui| {
+            ui.add_space(10.0);
+            egui::menu::bar(ui, |ui| {
+                // Logo and title
+                ui.horizontal(|ui| {
+                    if let Some(logo) = self.ui_components.logo_texture.as_ref() {
+                        ui.image((logo.id(), egui::vec2(40.0, 40.0)));
+                    }
+                    ui.heading("Arm Rotation Tracking System");
+                });
+                
+                ui.separator();
+                
+                // Mode selection
+                ui.horizontal(|ui| {
+                    let old_mode = self.mode;
+                    
+                    ui.selectable_value(&mut self.mode, AppMode::Live, "🎥 Live Camera");
+                    ui.selectable_value(&mut self.mode, AppMode::VideoFile, "📁 Video File");
+                    ui.selectable_value(&mut self.mode, AppMode::Playback, "📊 Analysis");
+                    
+                    // Handle mode changes
+                    if self.mode != old_mode {
+                        self.on_mode_changed(old_mode, self.mode);
+                    }
+                });
+                
+                ui.separator();
+                
+                // View mode buttons
+                ui.horizontal(|ui| {
+                    if ui.selectable_label(
+                        self.view_mode == ViewMode::SingleCamera,
+                        "Single View"
+                    ).clicked() {
+                        self.view_mode = ViewMode::SingleCamera;
+                    }
+                    
+                    if ui.selectable_label(
+                        self.view_mode == ViewMode::DualView,
+                        "Dual View"
+                    ).clicked() {
+                        self.view_mode = ViewMode::DualView;
+                    }
+                    
+                    if ui.selectable_label(
+                        self.view_mode == ViewMode::DataAnalysis,
+                        "Data Analysis"
+                    ).clicked() {
+                        self.view_mode = ViewMode::DataAnalysis;
+                    }
+                });
+                
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Settings button
+                    if ui.button("⚙ Settings").clicked() {
+                        self.show_settings = !self.show_settings;
+                    }
+                    
+                    // About button
+                    if ui.button("ℹ About").clicked() {
+                        self.show_about = !self.show_about;
+                    }
+                });
+            });
+            ui.add_space(10.0);
+        });
+    }
+    
+    fn render_main_content(&mut self, ctx: &egui::Context) {
+    egui::CentralPanel::default().show(ctx, |ui| {
+        match self.mode {
+            AppMode::Live => {
+                match self.view_mode {
+                    ViewMode::SingleCamera => self.render_single_view(ui),
+                    ViewMode::DualView => self.render_dual_view(ui),
+                    ViewMode::DataAnalysis => self.render_analysis_view(ui),
+                }
+            }
+            AppMode::VideoFile => {
+                self.render_video_file_mode(ui);
+            }
+            AppMode::Playback => {
+                self.render_analysis_view(ui);
+            }
+        }
+    });
+}
+
+fn render_video_file_mode(&mut self, ui: &mut egui::Ui) {
+    ui.vertical_centered(|ui| {
+        ui.add_space(50.0);
+        ui.heading("Video File Mode");
+        ui.add_space(20.0);
+        
+        if let Some(path) = &self.selected_video {
+            ui.label(format!("Selected: {}", path.display()));
+            ui.add_space(10.0);
+            
+            // Video playback controls would go here
+            ui.horizontal(|ui| {
+                if ui.button(if self.is_playing { "⏸ Pause" } else { "▶ Play" }).clicked() {
+                    self.is_playing = !self.is_playing;
+                }
+                
+                ui.add(egui::Slider::new(&mut self.video_progress, 0.0..=100.0)
+                    .text("Progress")
+                    .suffix("%"));
+            });
+            
+            ui.add_space(20.0);
+            
+            // Video display
+            self.render_video_panel(ui, true);
+        } else {
+            ui.label("No video file selected");
+            ui.add_space(20.0);
+            
+            if ui.button("📁 Select Video File").clicked() {
+                // TODO: Open file picker
+                eprintln!("File picker not yet implemented");
+                // For now, show a message
+                ui.label("File picker coming soon...");
+            }
+        }
+    });
+}
+    
+    fn render_single_view(&mut self, ui: &mut egui::Ui) {
+        ui.columns(2, |columns| {
+            // Left column - Video feed
+            columns[0].group(|ui| {
+                ui.heading("Camera Feed");
+                self.render_video_panel(ui, true);
+            });
+            
+            // Right column - Tracking info
+            columns[1].vertical(|ui| {
+                // Gesture detection panel
+                ui.group(|ui| {
+                    ui.heading("Gesture Detection");
+                    self.render_gesture_panel(ui);
+                });
+                
+                ui.add_space(20.0);
+                
+                // Joint tracking panel
+                ui.group(|ui| {
+                    ui.heading("Joint Tracking");
+                    self.render_joint_panel(ui);
+                });
+            });
+        });
+    }
+    
+    fn render_dual_view(&mut self, ui: &mut egui::Ui) {
+        // Top section - Video panels
+        ui.horizontal(|ui| {
+            let available_width = ui.available_width();
+            let panel_width = available_width / 2.0 - 10.0;
+            
+            // Raw feed panel
+            ui.allocate_ui(egui::vec2(panel_width, 400.0), |ui| {
+                ui.group(|ui| {
+                    ui.heading("Raw Feed");
+                    self.render_video_panel(ui, false);
+                });
+            });
+            
+            ui.add_space(20.0);
+            
+            // Tracking overlay panel
+            ui.allocate_ui(egui::vec2(panel_width, 400.0), |ui| {
+                ui.group(|ui| {
+                    ui.heading("Tracking Overlay");
+                    self.render_video_panel(ui, true);
+                });
+            });
+        });
+        
+        ui.separator();
+        ui.add_space(10.0);
+        
+        // Bottom section - Rotation info
+        ui.horizontal(|ui| {
+            let available_width = ui.available_width();
+            let panel_width = available_width / 2.0 - 10.0;
+            
+            // Left arm info
+            ui.allocate_ui(egui::vec2(panel_width, 200.0), |ui| {
+                self.render_arm_rotation_panel(ui, "left");
+            });
+            
+            ui.add_space(20.0);
+            
+            // Right arm info
+            ui.allocate_ui(egui::vec2(panel_width, 200.0), |ui| {
+                self.render_arm_rotation_panel(ui, "right");
+            });
+        });
+    }
+    
+    fn render_analysis_view(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Data Analysis");
+        
+        // Render charts and statistics
+        ui.horizontal(|ui| {
+            ui.group(|ui| {
+                ui.heading("Rotation History");
+                self.render_rotation_chart(ui);
+            });
+            
+            ui.group(|ui| {
+                ui.heading("Statistics");
+                self.render_statistics_panel(ui);
+            });
+        });
+        
+        ui.separator();
+        
+        // Data export section
+        ui.group(|ui| {
+            ui.heading("Export Data");
+            if ui.button("Export to CSV").clicked() {
+                self.export_data_to_csv();
+            }
+            if ui.button("Generate Report").clicked() {
+                self.generate_report();
+            }
+        });
+    }
+    
+    fn render_video_panel(&mut self, ui: &mut egui::Ui, with_overlay: bool) {
+    let available_size = ui.available_size();
+    
+    if let Some(texture_id) = self.get_current_frame_texture(with_overlay) {
+        // Calculate aspect ratio to maintain proper display
+        let aspect_ratio = 16.0 / 9.0; // Adjust based on your camera
+        let display_width = available_size.x - 20.0;
+        let display_height = display_width / aspect_ratio;
+        
+        ui.centered_and_justified(|ui| {
+            ui.image(egui::load::SizedTexture::new(
+                texture_id,
+                egui::vec2(display_width, display_height)
+            ));
+        });
+    } else {
+        ui.centered_and_justified(|ui| {
+            ui.label("No video feed available");
+            ui.label("Click 'Start Camera' to begin");
+        });
+    }
+}
+    
+    fn render_gesture_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            // Left arm gesture
+            ui.vertical(|ui| {
+                ui.label("Left Arm:");
+                if let Some(gesture) = self.current_result.left_gesture.as_ref() {
+                    let color = match gesture.gesture_type {
+                        GestureType::Supination => egui::Color32::from_rgb(76, 175, 80),
+                        GestureType::Pronation => egui::Color32::from_rgb(255, 152, 0),
+                        GestureType::None => egui::Color32::GRAY,
+                    };
+                    
+                    ui.colored_label(color, format!("{:?}", gesture.gesture_type));
+                    ui.label(format!("Confidence: {:.1}%", gesture.confidence * 100.0));
+                    ui.label(format!("Angle: {:.1}°", gesture.angle.to_degrees()));
+                } else {
+                    ui.colored_label(egui::Color32::GRAY, "No detection");
+                }
+            });
+            
+            ui.separator();
+            
+            // Right arm gesture
+            ui.vertical(|ui| {
+                ui.label("Right Arm:");
+                if let Some(gesture) = self.current_result.right_gesture.as_ref() {
+                    let color = match gesture.gesture_type {
+                        GestureType::Supination => egui::Color32::from_rgb(76, 175, 80),
+                        GestureType::Pronation => egui::Color32::from_rgb(255, 152, 0),
+                        GestureType::None => egui::Color32::GRAY,
+                    };
+                    
+                    ui.colored_label(color, format!("{:?}", gesture.gesture_type));
+                    ui.label(format!("Confidence: {:.1}%", gesture.confidence * 100.0));
+                    ui.label(format!("Angle: {:.1}°", gesture.angle.to_degrees()));
+                } else {
+                    ui.colored_label(egui::Color32::GRAY, "No detection");
+                }
+            });
+        });
+    }
+    
+    fn render_arm_rotation_panel(&mut self, ui: &mut egui::Ui, side: &str) {
+        let gesture = if side == "left" {
+            self.current_result.left_gesture.as_ref()
+        } else {
+            self.current_result.right_gesture.as_ref()
+        };
+        
+        ui.group(|ui| {
+            ui.heading(format!("{} Arm", if side == "left" { "Left" } else { "Right" }));
+            
+            if let Some(gesture) = gesture {
+                // Rotation type with colored background
+                let (bg_color, text_color) = match gesture.gesture_type {
+                    GestureType::Supination => (
+                        egui::Color32::from_rgb(76, 175, 80),
+                        egui::Color32::WHITE,
+                    ),
+                    GestureType::Pronation => (
+                        egui::Color32::from_rgb(255, 152, 0),
+                        egui::Color32::BLACK,
+                    ),
+                    GestureType::None => (
+                        egui::Color32::from_rgb(100, 100, 100),
+                        egui::Color32::WHITE,
+                    ),
+                };
+                
+                ui.allocate_ui(egui::vec2(ui.available_width(), 50.0), |ui| {
+                    let rect = ui.available_rect_before_wrap();
+                    ui.painter().rect_filled(
+                        rect,
+                        egui::Rounding::same(8.0),
+                        bg_color,
+                    );
+                    
+                    ui.centered_and_justified(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{:?}", gesture.gesture_type))
+                                .size(24.0)
+                                .color(text_color)
+                        );
+                    });
+                });
+                
+                ui.add_space(10.0);
+                
+                // Confidence bar
+                ui.label("Confidence:");
+                ui.add(egui::ProgressBar::new(gesture.confidence as f32)
+                    .show_percentage()
+                    .animate(true));
+                
+                // Angle indicator
+                ui.label(format!("Rotation Angle: {:.1}°", gesture.angle.to_degrees()));
+            } else {
+                ui.centered_and_justified(|ui| {
+                    ui.label(
+                        egui::RichText::new("No rotation detected")
+                            .size(18.0)
+                            .color(egui::Color32::GRAY)
+                    );
+                });
+            }
+        });
+    }
+    
+    fn render_joint_panel(&mut self, ui: &mut egui::Ui) {
+        // Implementation for joint tracking visualization
+        ui.label("Joint tracking information...");
+    }
+    
+    fn render_rotation_chart(&mut self, ui: &mut egui::Ui) {
+        // Implementation for rotation history chart
+        ui.label("Rotation history chart...");
+    }
+    
+    fn render_statistics_panel(&mut self, ui: &mut egui::Ui) {
+        // Implementation for statistics display
+        ui.label("Statistics...");
+    }
+    
+    fn render_control_panel(&mut self, ctx: &egui::Context) {
+    egui::TopBottomPanel::bottom("controls").show(ctx, |ui| {
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            // Only show camera controls in Live mode
+            if self.mode == AppMode::Live {
+                if self.video_source.is_some() {
+                    if ui.add_sized(
+                        [120.0, 40.0],
+                        egui::Button::new("⏹ Stop Camera")
+                            .fill(egui::Color32::from_rgb(244, 67, 54))
+                    ).clicked() {
+                        self.stop_camera();
+                    }
+                } else {
+                    if ui.add_sized(
+                        [120.0, 40.0],
+                        egui::Button::new("📷 Start Camera")
+                            .fill(egui::Color32::from_rgb(33, 150, 243))
+                    ).clicked() {
+                        self.start_camera();
+                    }
+                }
+                
+                ui.separator();
+            }
+            
+            // Record button (only in Live or VideoFile mode)
+            if self.mode != AppMode::Playback {
+                let record_btn = if self.is_recording {
+                    ui.add_sized(
+                        [120.0, 40.0],
+                        egui::Button::new("⏹ Stop Recording")
+                            .fill(egui::Color32::from_rgb(244, 67, 54))
+                    )
+                } else {
+                    ui.add_sized(
+                        [120.0, 40.0],
+                        egui::Button::new("⏺ Record")
+                            .fill(egui::Color32::from_rgb(76, 175, 80))
+                    )
+                };
+                
+                if record_btn.clicked() {
+                    self.toggle_recording();
+                }
+                
+                ui.separator();
+            }
+            
+            // Playback controls for video mode
+            if self.mode == AppMode::VideoFile {
+                if ui.button(if self.is_playing { "⏸" } else { "▶" }).clicked() {
+                    self.is_playing = !self.is_playing;
+                }
+                
+                ui.add(egui::Slider::new(&mut self.video_progress, 0.0..=100.0)
+                    .text("Progress")
+                    .suffix("%"));
+                
+                ui.separator();
+            }
+            
+            // Arm toggles (only in Live mode)
+            if self.mode == AppMode::Live {
+                ui.checkbox(&mut self.settings.enable_left_arm, "Left Arm");
+                ui.checkbox(&mut self.settings.enable_right_arm, "Right Arm");
+                ui.checkbox(&mut self.settings.enable_fingers, "Fingers");
+            }
+            
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.is_recording {
+                    let duration = self.recording_duration;
+                    let minutes = duration.as_secs() / 60;
+                    let seconds = duration.as_secs() % 60;
+                    ui.label(
+                        egui::RichText::new(format!("Recording: {:02}:{:02}", minutes, seconds))
+                            .color(egui::Color32::from_rgb(244, 67, 54))
+                    );
+                }
+            });
+        });
+        ui.add_space(10.0);
+    });
+}
+    
+    fn toggle_recording(&mut self) {
+        self.is_recording = !self.is_recording;
+        
+        if self.is_recording {
+            self.recording_start = Some(Local::now());
+            // Initialize recorder
+            // self.recorder = Some(VideoRecorder::new(...));
+        } else {
+            self.recording_start = None;
+            self.recording_duration = std::time::Duration::ZERO;
+            // Save recording
+            // self.save_recording();
+        }
+    }
+    
+    fn get_current_frame_texture(&self, _with_overlay: bool) -> Option<egui::TextureId> {
+        self.current_frame_texture.as_ref().map(|t| t.id())
+    }
+    
+    fn export_data_to_csv(&self) {
+        // Implementation for CSV export
+    }
+    
+    fn generate_report(&self) {
+        // Implementation for report generation
+    }
+}
+
+impl eframe::App for ArmTrackerApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Update recording duration if recording
+        if self.is_recording {
+            if let Some(start) = self.recording_start {
+                self.recording_duration = Local::now()
+                    .signed_duration_since(start)
+                    .to_std()
+                    .unwrap_or_default();
+            }
+        }
+        
+                if let Some(video_source) = self.video_source.as_mut() {
+            match video_source.read_frame() {
+                Ok(frame) => {
+                    // Convert DynamicImage to egui texture
+                    let size = [frame.width() as usize, frame.height() as usize];
+                    let rgba = frame.to_rgba8();
+                    let pixels = rgba.as_flat_samples();
+                    
+                    let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                        size,
+                        pixels.as_slice(),
+                    );
+                    
+                    // Update or create texture
+                    if let Some(texture) = &mut self.current_frame_texture {
+                        texture.set(color_image, Default::default());
+                    } else {
+                        self.current_frame_texture = Some(ctx.load_texture(
+                            "video_frame",
+                            color_image,
+                            Default::default(),
+                        ));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to read frame: {}", e);
+                }
+            }
+        }
+
+        // Render UI components
+        self.render_header(ctx);
+        self.render_control_panel(ctx);
+        
+        if self.show_settings {
+            self.render_settings_window(ctx);
+        }
+        
+        if self.show_about {
+            self.render_about_window(ctx);
+        }
+        
+        self.render_main_content(ctx);
+        
+        ctx.request_repaint();
+    }
+}
+
+impl ArmTrackerApp {
+    fn render_settings_window(&mut self, ctx: &egui::Context) {
+        egui::Window::new("Settings")
+            .open(&mut self.show_settings)
+            .resizable(true)
+            .default_size([400.0, 500.0])
+            .show(ctx, |ui| {
+                ui.heading("Tracking Settings");
+                
+                ui.add_space(10.0);
+                
+                ui.label("Confidence Threshold:");
+                ui.add(egui::Slider::new(&mut self.settings.confidence_threshold, 0.0..=1.0)
+                    .step_by(0.01));
+                
+                ui.label("Smoothing Factor:");
+                ui.add(egui::Slider::new(&mut self.settings.smoothing_factor, 0.0..=1.0)
+                    .step_by(0.01));
+                
+                ui.separator();
+                
+                ui.heading("Video Settings");
+                
+                ui.label("Quality:");
+                egui::ComboBox::from_label("")
+                    .selected_text(format!("{:?}", self.settings.video_quality))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.settings.video_quality, VideoQuality::Low, "Low");
+                        ui.selectable_value(&mut self.settings.video_quality, VideoQuality::Medium, "Medium");
+                        ui.selectable_value(&mut self.settings.video_quality, VideoQuality::High, "High");
+                        ui.selectable_value(&mut self.settings.video_quality, VideoQuality::Ultra, "Ultra");
+                    });
+                
+                ui.separator();
+                
+                ui.heading("Output Settings");
+                
+                ui.checkbox(&mut self.settings.auto_save, "Auto-save recordings");
+                
+                ui.label("Output Directory:");
+                ui.label(self.settings.output_directory.display().to_string());
+                if ui.button("Browse...").clicked() {
+                    // Open file dialog
+                }
+            });
+    }
+    
+    fn render_about_window(&mut self, ctx: &egui::Context) {
+        egui::Window::new("About")
+            .open(&mut self.show_about)
+            .resizable(false)
+            .default_size([400.0, 300.0])
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.heading("Arm Rotation Tracking System");
+                    ui.label("Version 1.0.0");
+                    ui.add_space(20.0);
+                    ui.label("A sophisticated motion tracking application");
+                    ui.label("for analyzing arm rotation patterns.");
+                    ui.add_space(20.0);
+                    ui.hyperlink("https://github.com/Juliorodrigo23/Supro");
+                });
+            });
+    }
+}
+
+================================================================================
+FILE: data.rs
+================================================================================
+
+// src/data.rs
+use crate::tracking::{TrackingResult, GestureType};
+use csv::Writer;
+use std::path::{Path, PathBuf};
+use std::fs::File;
+use anyhow::{Result, Context};
+use chrono::{DateTime, Local};
+use serde::Serialize;
+
+#[derive(Debug, Serialize)]
+struct TrackingRecord {
+    timestamp: f64,
+    frame: i32,
+    tracking_lost: bool,
+    
+    // Joint positions
+    left_shoulder_x: Option<f64>,
+    left_shoulder_y: Option<f64>,
+    left_shoulder_z: Option<f64>,
+    left_shoulder_confidence: Option<f64>,
+    
+    right_shoulder_x: Option<f64>,
+    right_shoulder_y: Option<f64>,
+    right_shoulder_z: Option<f64>,
+    right_shoulder_confidence: Option<f64>,
+    
+    left_elbow_x: Option<f64>,
+    left_elbow_y: Option<f64>,
+    left_elbow_z: Option<f64>,
+    left_elbow_confidence: Option<f64>,
+    
+    right_elbow_x: Option<f64>,
+    right_elbow_y: Option<f64>,
+    right_elbow_z: Option<f64>,
+    right_elbow_confidence: Option<f64>,
+    
+    left_wrist_x: Option<f64>,
+    left_wrist_y: Option<f64>,
+    left_wrist_z: Option<f64>,
+    left_wrist_confidence: Option<f64>,
+    
+    right_wrist_x: Option<f64>,
+    right_wrist_y: Option<f64>,
+    right_wrist_z: Option<f64>,
+    right_wrist_confidence: Option<f64>,
+    
+    // Gestures
+    left_gesture: Option<String>,
+    left_gesture_confidence: Option<f64>,
+    left_gesture_angle: Option<f64>,
+    
+    right_gesture: Option<String>,
+    right_gesture_confidence: Option<f64>,
+    right_gesture_angle: Option<f64>,
+}
+
+pub struct DataExporter {
+    output_dir: PathBuf,
+    session_name: String,
+    tracking_data: Vec<TrackingResult>,
+    timestamps: Vec<f64>,
+}
+
+impl DataExporter {
+    pub fn new(output_dir: impl AsRef<Path>, session_name: Option<String>) -> Self {
+        let session_name = session_name.unwrap_or_else(|| {
+            format!("session_{}", Local::now().format("%Y%m%d_%H%M%S"))
+        });
+        
+        Self {
+            output_dir: output_dir.as_ref().to_path_buf(),
+            session_name,
+            tracking_data: Vec::new(),
+            timestamps: Vec::new(),
+        }
+    }
+    
+    pub fn add_frame(&mut self, result: TrackingResult, timestamp: f64) {
+        self.tracking_data.push(result);
+        self.timestamps.push(timestamp);
+    }
+    
+    pub fn export_csv(&self) -> Result<PathBuf> {
+        let csv_path = self.output_dir
+            .join(&self.session_name)
+            .join("tracking_data.csv");
+        
+        // Create directory if it doesn't exist
+        if let Some(parent) = csv_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        
+        let file = File::create(&csv_path)?;
+        let mut writer = Writer::from_writer(file);
+        
+        for (i, (result, timestamp)) in self.tracking_data.iter()
+            .zip(self.timestamps.iter())
+            .enumerate() 
+        {
+            let record = self.create_record(i as i32, *timestamp, result);
+            writer.serialize(record)?;
+        }
+        
+        writer.flush()?;
+        Ok(csv_path)
+    }
+    
+    fn create_record(&self, frame: i32, timestamp: f64, result: &TrackingResult) -> TrackingRecord {
+        let mut record = TrackingRecord {
+            timestamp,
+            frame,
+            tracking_lost: result.tracking_lost,
+            left_shoulder_x: None,
+            left_shoulder_y: None,
+            left_shoulder_z: None,
+            left_shoulder_confidence: None,
+            right_shoulder_x: None,
+            right_shoulder_y: None,
+            right_shoulder_z: None,
+            right_shoulder_confidence: None,
+            left_elbow_x: None,
+            left_elbow_y: None,
+            left_elbow_z: None,
+            left_elbow_confidence: None,
+            right_elbow_x: None,
+            right_elbow_y: None,
+            right_elbow_z: None,
+            right_elbow_confidence: None,
+            left_wrist_x: None,
+            left_wrist_y: None,
+            left_wrist_z: None,
+            left_wrist_confidence: None,
+            right_wrist_x: None,
+            right_wrist_y: None,
+            right_wrist_z: None,
+            right_wrist_confidence: None,
+            left_gesture: None,
+            left_gesture_confidence: None,
+            left_gesture_angle: None,
+            right_gesture: None,
+            right_gesture_confidence: None,
+            right_gesture_angle: None,
+        };
+        
+        // Fill in joint data
+        for (name, joint) in &result.joints {
+            match name.as_str() {
+                "left_shoulder" => {
+                    record.left_shoulder_x = Some(joint.position.x);
+                    record.left_shoulder_y = Some(joint.position.y);
+                    record.left_shoulder_z = Some(joint.position.z);
+                    record.left_shoulder_confidence = Some(joint.confidence);
+                }
+                "right_shoulder" => {
+                    record.right_shoulder_x = Some(joint.position.x);
+                    record.right_shoulder_y = Some(joint.position.y);
+                    record.right_shoulder_z = Some(joint.position.z);
+                    record.right_shoulder_confidence = Some(joint.confidence);
+                }
+                "left_elbow" => {
+                    record.left_elbow_x = Some(joint.position.x);
+                    record.left_elbow_y = Some(joint.position.y);
+                    record.left_elbow_z = Some(joint.position.z);
+                    record.left_elbow_confidence = Some(joint.confidence);
+                }
+                "right_elbow" => {
+                    record.right_elbow_x = Some(joint.position.x);
+                    record.right_elbow_y = Some(joint.position.y);
+                    record.right_elbow_z = Some(joint.position.z);
+                    record.right_elbow_confidence = Some(joint.confidence);
+                }
+                "left_wrist" => {
+                    record.left_wrist_x = Some(joint.position.x);
+                    record.left_wrist_y = Some(joint.position.y);
+                    record.left_wrist_z = Some(joint.position.z);
+                    record.left_wrist_confidence = Some(joint.confidence);
+                }
+                "right_wrist" => {
+                    record.right_wrist_x = Some(joint.position.x);
+                    record.right_wrist_y = Some(joint.position.y);
+                    record.right_wrist_z = Some(joint.position.z);
+                    record.right_wrist_confidence = Some(joint.confidence);
+                }
+                _ => {}
+            }
+        }
+        
+        // Fill in gesture data
+        if let Some(left_gesture) = &result.left_gesture {
+            record.left_gesture = Some(format!("{:?}", left_gesture.gesture_type));
+            record.left_gesture_confidence = Some(left_gesture.confidence);
+            record.left_gesture_angle = Some(left_gesture.angle);
+        }
+        
+        if let Some(right_gesture) = &result.right_gesture {
+            record.right_gesture = Some(format!("{:?}", right_gesture.gesture_type));
+            record.right_gesture_confidence = Some(right_gesture.confidence);
+            record.right_gesture_angle = Some(right_gesture.angle);
+        }
+        
+        record
+    }
+    
+    pub fn generate_report(&self) -> Result<PathBuf> {
+        let report_path = self.output_dir
+            .join(&self.session_name)
+            .join("report.html");
+        
+        // Create directory if it doesn't exist
+        if let Some(parent) = report_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        
+        let html_content = self.create_html_report()?;
+        std::fs::write(&report_path, html_content)?;
+        
+        Ok(report_path)
+    }
+    
+    fn create_html_report(&self) -> Result<String> {
+        let total_frames = self.tracking_data.len();
+        let tracking_lost_count = self.tracking_data.iter()
+            .filter(|r| r.tracking_lost)
+            .count();
+        
+        let left_supination_count = self.tracking_data.iter()
+            .filter(|r| r.left_gesture.as_ref()
+                .map(|g| g.gesture_type == GestureType::Supination)
+                .unwrap_or(false))
+            .count();
+        
+        let left_pronation_count = self.tracking_data.iter()
+            .filter(|r| r.left_gesture.as_ref()
+                .map(|g| g.gesture_type == GestureType::Pronation)
+                .unwrap_or(false))
+            .count();
+        
+        let html = format!(r#"
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Arm Tracking Report - {}</title>
+    <style>
+        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 40px; background: #f5f5f5; }}
+        h1 {{ color: #333; }}
+        .stats {{ background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        .stat-item {{ margin: 10px 0; }}
+        .stat-label {{ font-weight: bold; color: #666; }}
+        .stat-value {{ color: #4682EA; font-size: 1.2em; }}
+    </style>
+</head>
+<body>
+    <h1>Arm Tracking Session Report</h1>
+    <div class="stats">
+        <h2>Session: {}</h2>
+        <div class="stat-item">
+            <span class="stat-label">Total Frames:</span>
+            <span class="stat-value">{}</span>
+        </div>
+        <div class="stat-item">
+            <span class="stat-label">Tracking Success Rate:</span>
+            <span class="stat-value">{:.1}%</span>
+        </div>
+        <div class="stat-item">
+            <span class="stat-label">Left Arm Supination:</span>
+            <span class="stat-value">{} frames</span>
+        </div>
+        <div class="stat-item">
+            <span class="stat-label">Left Arm Pronation:</span>
+            <span class="stat-value">{} frames</span>
+        </div>
+    </div>
+</body>
+</html>
+        "#,
+            self.session_name,
+            self.session_name,
+            total_frames,
+            (1.0 - tracking_lost_count as f64 / total_frames as f64) * 100.0,
+            left_supination_count,
+            left_pronation_count
+        );
+        
+        Ok(html)
+    }
+}
+
+================================================================================
+FILE: main.rs
+================================================================================
+
+// src/main.rs
+mod app;
+mod tracking;
+mod ui;
+mod video;
+mod data;
+
+use eframe::egui;
+use usvg::TreeParsing;
+
+fn main() {
+    // Initialize logging
+    tracing_subscriber::fmt::init();
+
+    if let Ok(p) = std::env::current_exe() {
+        eprintln!("Running from: {}", p.display());
+    }
+
+    // DEBUG: List all available cameras
+    println!("=== Camera Detection Debug ===");
+    match nokhwa::query(nokhwa::utils::ApiBackend::Auto) {
+        Ok(cameras) => {
+            println!("Found {} camera(s):", cameras.len());
+            for (i, camera) in cameras.iter().enumerate() {
+                println!("  [{}] {}", i, camera.human_name());
+            }
+        }
+        Err(e) => {
+            println!("Failed to query cameras: {}", e);
+        }
+    }
+    println!("============================\n");
+
+
+
+    // Set up GUI options
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1400.0, 900.0])
+            .with_min_inner_size([1200.0, 800.0]),
+        centered: true,
+        ..Default::default()
+    };
+
+    // Run the application
+    let result = eframe::run_native(
+        "Arm Rotation Tracking System",
+        options,
+        Box::new(|cc| {
+            // Configure fonts and visuals
+            configure_fonts(&cc.egui_ctx);
+            cc.egui_ctx.set_visuals(create_visuals());
+            
+            Box::new(app::ArmTrackerApp::new(cc))
+        }),
+    );
+
+    // Handle the error if needed
+    if let Err(e) = result {
+        eprintln!("Error running application: {:?}", e);
+    }
+}
+
+
+
+fn load_svg_as_rgba(path: &str, size: u32) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let svg_data = std::fs::read_to_string(path)?;
+    let opt = usvg::Options::default();
+    let tree = usvg::Tree::from_str(&svg_data, &opt)?;
+    
+    // Use resvg's re-exported tiny_skia types
+    let pixmap_size = tree.size.to_int_size();
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(size, size).unwrap();
+    
+    let scale = size as f32 / pixmap_size.width().max(pixmap_size.height()) as f32;
+    let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+    
+    // Use the Tree's render method directly with consistent types
+    resvg::Tree::from_usvg(&tree).render(transform, &mut pixmap.as_mut());
+    
+    Ok(pixmap.data().to_vec())
+}
+
+fn configure_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    
+    // Load Montserrat font
+    let font_path = "/Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/fonts/Montserrat-VariableFont_wght.ttf";
+    if let Ok(font_data) = std::fs::read(font_path) {
+        fonts.font_data.insert(
+            "Montserrat".to_owned(),
+            egui::FontData::from_owned(font_data),
+        );
+        
+        // Set Montserrat as the primary font
+        fonts.families.entry(egui::FontFamily::Proportional)
+            .or_default()
+            .insert(0, "Montserrat".to_owned());
+            
+        fonts.families.entry(egui::FontFamily::Monospace)
+            .or_default()
+            .push("Montserrat".to_owned());
+    }
+    
+    ctx.set_fonts(fonts);
+}
+
+fn create_visuals() -> egui::Visuals {
+    let mut visuals = egui::Visuals::dark();
+    
+    // Customize colors for a modern, professional look
+    visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(30, 30, 35);
+    visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(45, 45, 52);
+    visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(55, 55, 65);
+    visuals.widgets.active.bg_fill = egui::Color32::from_rgb(70, 130, 240);
+    
+    // Adjust rounding for modern appearance
+    visuals.widgets.noninteractive.rounding = egui::Rounding::same(8.0);
+    visuals.widgets.inactive.rounding = egui::Rounding::same(8.0);
+    visuals.widgets.hovered.rounding = egui::Rounding::same(8.0);
+    visuals.widgets.active.rounding = egui::Rounding::same(8.0);
+    
+    visuals.window_rounding = egui::Rounding::same(12.0);
+    visuals.menu_rounding = egui::Rounding::same(8.0);
+    
+    visuals
+}
+
+================================================================================
+FILE: mediapipe_bridge.rs
+================================================================================
+
+// src/mediapipe_bridge.rs - Stub version for testing
+use anyhow::Result;
+use nalgebra::Vector3;
+
+pub struct MediaPipeWrapper;
+
+impl MediaPipeWrapper {
+    pub fn new() -> Result<Self> {
+        Ok(Self)
+    }
+    
+    pub fn process(&self, _frame_data: &[u8]) -> Result<(Vec<Vector3<f64>>, Vec<Vec<Vector3<f64>>>)> {
+        // Return dummy data for testing
+        let pose_landmarks = vec![
+            Vector3::new(0.5, 0.5, 0.0), // Example landmark
+        ];
+        let hand_landmarks = vec![];
+        
+        Ok((pose_landmarks, hand_landmarks))
+    }
+}
+
+================================================================================
+FILE: tracking.rs
+================================================================================
+
+// src/tracking.rs - Version without OpenCV
+use nalgebra::{Vector3, Matrix3};
+use std::collections::{HashMap, VecDeque};
+use anyhow::Result;
+use image::DynamicImage;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GestureType {
+    Pronation,
+    Supination,
+    None,
+}
+
+#[derive(Debug, Clone)]
+pub struct GestureState {
+    pub gesture_type: GestureType,
+    pub confidence: f64,
+    pub angle: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct JointState {
+    pub position: Vector3<f64>,
+    pub velocity: Vector3<f64>,
+    pub confidence: f64,
+    pub pixel_pos: (i32, i32),
+}
+
+#[derive(Debug, Clone)]
+pub struct HandState {
+    pub landmarks: Vec<Vector3<f64>>,
+    pub confidences: Vec<f64>,
+    pub is_tracked: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TrackingResult {
+    pub tracking_lost: bool,
+    pub joints: HashMap<String, JointState>,
+    pub hands: HashMap<String, HandState>,
+    pub left_gesture: Option<GestureState>,
+    pub right_gesture: Option<GestureState>,
+    pub timestamp: f64,
+}
+
+pub struct ArmTracker {
+    active_arms: HashMap<String, bool>,
+    active_fingers: HashMap<String, bool>,
+    palm_history: HashMap<String, VecDeque<Vector3<f64>>>,
+    rotation_history: HashMap<String, VecDeque<f64>>,
+    last_valid_gestures: HashMap<String, GestureState>,
+    config: TrackerConfig,
+    // Simulation state for demo
+    sim_time: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct TrackerConfig {
+    pub history_size: usize,
+    pub confidence_threshold: f64,
+    pub gesture_angle_threshold: f64,
+    pub min_rotation_threshold: f64,
+    pub rotation_smoothing_factor: f64,
+    pub min_stable_frames: usize,
+}
+
+impl Default for TrackerConfig {
+    fn default() -> Self {
+        Self {
+            history_size: 10,
+            confidence_threshold: 0.6,
+            gesture_angle_threshold: 0.1,
+            min_rotation_threshold: 0.05,
+            rotation_smoothing_factor: 0.5,
+            min_stable_frames: 2,
+        }
+    }
+}
+
+impl ArmTracker {
+    pub fn new() -> Result<Self> {
+        let mut tracker = Self {
+            active_arms: HashMap::new(),
+            active_fingers: HashMap::new(),
+            palm_history: HashMap::new(),
+            rotation_history: HashMap::new(),
+            last_valid_gestures: HashMap::new(),
+            config: TrackerConfig::default(),
+            sim_time: 0.0,
+        };
+        
+        // Initialize tracking flags
+        tracker.active_arms.insert("left".to_string(), true);
+        tracker.active_arms.insert("right".to_string(), true);
+        tracker.active_fingers.insert("left".to_string(), true);
+        tracker.active_fingers.insert("right".to_string(), true);
+        
+        // Initialize history buffers
+        for side in &["left", "right"] {
+            tracker.palm_history.insert(
+                side.to_string(),
+                VecDeque::with_capacity(tracker.config.history_size)
+            );
+            tracker.rotation_history.insert(
+                side.to_string(),
+                VecDeque::with_capacity(tracker.config.history_size)
+            );
+            tracker.last_valid_gestures.insert(
+                side.to_string(),
+                GestureState {
+                    gesture_type: GestureType::None,
+                    confidence: 0.0,
+                    angle: 0.0,
+                }
+            );
+        }
+        
+        Ok(tracker)
+    }
+    
+    pub fn process_frame(&mut self, _frame: &DynamicImage) -> Result<TrackingResult> {
+        // Update simulation time
+        self.sim_time += 0.033; // ~30fps
+        
+        // Create simulated tracking data for demo
+        let mut result = TrackingResult::default();
+        result.tracking_lost = false;
+        result.timestamp = self.sim_time;
+        
+        // Simulate joint positions with some movement
+        let t = self.sim_time;
+        
+        // Left arm joints
+        if *self.active_arms.get("left").unwrap_or(&false) {
+            result.joints.insert("left_shoulder".to_string(), JointState {
+                position: Vector3::new(0.3, 0.4, 0.0),
+                velocity: Vector3::zeros(),
+                confidence: 0.95,
+                pixel_pos: (300, 200),
+            });
+            
+            result.joints.insert("left_elbow".to_string(), JointState {
+                position: Vector3::new(0.35, 0.5 + 0.05 * t.sin(), 0.0),
+                velocity: Vector3::new(0.0, 0.05 * t.cos(), 0.0),
+                confidence: 0.9,
+                pixel_pos: (350, 300),
+            });
+            
+            result.joints.insert("left_wrist".to_string(), JointState {
+                position: Vector3::new(0.4 + 0.1 * (t * 0.5).cos(), 0.6 + 0.1 * t.sin(), 0.0),
+                velocity: Vector3::new(-0.05 * (t * 0.5).sin(), 0.1 * t.cos(), 0.0),
+                confidence: 0.85,
+                pixel_pos: (400, 400),
+            });
+            
+            // Simulate gesture detection
+            let gesture_type = if (t * 0.3).sin() > 0.3 {
+                GestureType::Supination
+            } else if (t * 0.3).sin() < -0.3 {
+                GestureType::Pronation
+            } else {
+                GestureType::None
+            };
+            
+            if gesture_type != GestureType::None {
+                result.left_gesture = Some(GestureState {
+                    gesture_type,
+                    confidence: 0.7 + 0.2 * (t * 2.0).sin().abs(),
+                    angle: 45.0_f64.to_radians() * (t * 0.3).sin(),
+                });
+            }
+        }
+        
+        // Right arm joints
+        if *self.active_arms.get("right").unwrap_or(&false) {
+            result.joints.insert("right_shoulder".to_string(), JointState {
+                position: Vector3::new(0.7, 0.4, 0.0),
+                velocity: Vector3::zeros(),
+                confidence: 0.95,
+                pixel_pos: (700, 200),
+            });
+            
+            result.joints.insert("right_elbow".to_string(), JointState {
+                position: Vector3::new(0.65, 0.5 + 0.05 * (t + 1.5).sin(), 0.0),
+                velocity: Vector3::new(0.0, 0.05 * (t + 1.5).cos(), 0.0),
+                confidence: 0.9,
+                pixel_pos: (650, 300),
+            });
+            
+            result.joints.insert("right_wrist".to_string(), JointState {
+                position: Vector3::new(0.6 - 0.1 * (t * 0.5 + 1.0).cos(), 0.6 + 0.1 * (t + 1.5).sin(), 0.0),
+                velocity: Vector3::new(0.05 * (t * 0.5 + 1.0).sin(), 0.1 * (t + 1.5).cos(), 0.0),
+                confidence: 0.85,
+                pixel_pos: (600, 400),
+            });
+            
+            // Simulate gesture detection for right arm
+            let gesture_type = if (t * 0.25 + 1.0).sin() > 0.3 {
+                GestureType::Pronation
+            } else if (t * 0.25 + 1.0).sin() < -0.3 {
+                GestureType::Supination
+            } else {
+                GestureType::None
+            };
+            
+            if gesture_type != GestureType::None {
+                result.right_gesture = Some(GestureState {
+                    gesture_type,
+                    confidence: 0.65 + 0.25 * (t * 1.5).cos().abs(),
+                    angle: 50.0_f64.to_radians() * (t * 0.25 + 1.0).sin(),
+                });
+            }
+        }
+        
+        Ok(result)
+    }
+    
+    pub fn toggle_arm(&mut self, side: &str) {
+        if let Some(active) = self.active_arms.get_mut(side) {
+            *active = !*active;
+        }
+    }
+    
+    pub fn toggle_fingers(&mut self, side: &str) {
+        if let Some(active) = self.active_fingers.get_mut(side) {
+            *active = !*active;
+        }
+    }
+}
+
+================================================================================
+FILE: ui.rs
+================================================================================
+
+// src/ui.rs - Fixed to use resvg's re-exported tiny_skia
+use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
+use image::DynamicImage;
+use usvg::TreeParsing;
+
+#[derive(Debug, Clone)]
+pub struct Theme {
+    pub primary: Color32,
+    pub secondary: Color32,
+    pub background: Color32,
+    pub surface: Color32,
+    pub error: Color32,
+    pub warning: Color32,
+    pub success: Color32,
+    pub text_primary: Color32,
+    pub text_secondary: Color32,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self {
+            primary: Color32::from_rgb(70, 130, 240),
+            secondary: Color32::from_rgb(255, 152, 0),
+            background: Color32::from_rgb(20, 20, 25),
+            surface: Color32::from_rgb(30, 30, 35),
+            error: Color32::from_rgb(244, 67, 54),
+            warning: Color32::from_rgb(255, 152, 0),
+            success: Color32::from_rgb(76, 175, 80),
+            text_primary: Color32::WHITE,
+            text_secondary: Color32::from_rgb(200, 200, 200),
+        }
+    }
+}
+
+pub struct UIComponents {
+    pub logo_texture: Option<egui::TextureHandle>,
+    pub theme: Theme,
+    animations: AnimationState,
+}
+
+#[derive(Default)]
+struct AnimationState {
+    record_pulse: f32,
+    gesture_transitions: std::collections::HashMap<String, f32>,
+}
+
+impl UIComponents {
+    pub fn new(ctx: &egui::Context) -> Self {
+        let mut components = Self {
+            logo_texture: None,
+            theme: Theme::default(),
+            animations: AnimationState::default(),
+        };
+        
+        // Try to load SVG logo
+        let logo_path = "/Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/assets/supro.svg";
+        if let Ok(logo_rgba) = load_svg_as_rgba(logo_path, 256) {
+            let size = [256, 256];
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                size,
+                &logo_rgba,
+            );
+            
+            components.logo_texture = Some(ctx.load_texture(
+                "logo",
+                color_image,
+                Default::default(),
+            ));
+        }
+        
+        components
+    }
+    
+    pub fn draw_gesture_indicator(
+        &mut self,
+        ui: &mut egui::Ui,
+        gesture_type: &str,
+        confidence: f32,
+        angle: f32,
+    ) {
+        let available_size = ui.available_size();
+        let center = Pos2::new(available_size.x / 2.0, available_size.y / 2.0);
+        let radius = available_size.x.min(available_size.y) * 0.4;
+        
+        // Background circle
+        let painter = ui.painter();
+        painter.circle_filled(center, radius, self.theme.surface);
+        
+        // Confidence arc
+        let color = match gesture_type {
+            "supination" => self.theme.success,
+            "pronation" => self.theme.warning,
+            _ => self.theme.text_secondary,
+        };
+        
+        let arc_angle = confidence * std::f32::consts::PI * 2.0;
+        draw_arc(painter, center, radius * 0.9, 0.0, arc_angle, color, 5.0);
+        
+        // Center text
+        painter.text(
+            center,
+            egui::Align2::CENTER_CENTER,
+            gesture_type.to_uppercase(),
+            egui::FontId::proportional(24.0),
+            self.theme.text_primary,
+        );
+        
+        // Angle indicator
+        let angle_text = format!("{:.1}°", angle.to_degrees());
+        painter.text(
+            Pos2::new(center.x, center.y + radius * 0.5),
+            egui::Align2::CENTER_CENTER,
+            angle_text,
+            egui::FontId::proportional(16.0),
+            self.theme.text_secondary,
+        );
+    }
+    
+    pub fn draw_joint_skeleton(
+        &mut self,
+        ui: &mut egui::Ui,
+        joints: &[(String, (f32, f32))],
+    ) {
+        let painter = ui.painter();
+        let rect = ui.available_rect_before_wrap();
+        
+        // Define skeleton connections
+        let connections = vec![
+            ("left_shoulder", "left_elbow"),
+            ("left_elbow", "left_wrist"),
+            ("right_shoulder", "right_elbow"),
+            ("right_elbow", "right_wrist"),
+            ("left_shoulder", "right_shoulder"),
+        ];
+        
+        // Draw connections
+        for (from, to) in connections {
+            if let (Some(from_joint), Some(to_joint)) = (
+                joints.iter().find(|(name, _)| name == from),
+                joints.iter().find(|(name, _)| name == to),
+            ) {
+                let from_pos = Pos2::new(
+                    rect.left() + from_joint.1.0 * rect.width(),
+                    rect.top() + from_joint.1.1 * rect.height(),
+                );
+                let to_pos = Pos2::new(
+                    rect.left() + to_joint.1.0 * rect.width(),
+                    rect.top() + to_joint.1.1 * rect.height(),
+                );
+                
+                painter.line_segment(
+                    [from_pos, to_pos],
+                    Stroke::new(2.0, self.theme.primary),
+                );
+            }
+        }
+        
+        // Draw joints
+        for (name, (x, y)) in joints {
+            let pos = Pos2::new(
+                rect.left() + x * rect.width(),
+                rect.top() + y * rect.height(),
+            );
+            
+            let color = if name.contains("left") {
+                self.theme.primary
+            } else {
+                self.theme.secondary
+            };
+            
+            painter.circle_filled(pos, 5.0, color);
+            painter.circle_stroke(pos, 7.0, Stroke::new(2.0, self.theme.text_primary));
+        }
+    }
+    
+    pub fn draw_recording_indicator(&mut self, ui: &mut egui::Ui, is_recording: bool) {
+        if !is_recording {
+            return;
+        }
+        
+        // Animate pulse effect
+        self.animations.record_pulse += ui.input(|i| i.unstable_dt) * 2.0;
+        let pulse = (self.animations.record_pulse.sin() + 1.0) * 0.5;
+        
+        let size = 20.0 + pulse * 5.0;
+        let color = Color32::from_rgb(
+            244,
+            (67.0 + pulse * 30.0) as u8,
+            54,
+        );
+        
+        let painter = ui.painter();
+        let pos = Pos2::new(ui.available_width() - 30.0, 30.0);
+        
+        painter.circle_filled(pos, size, color);
+        painter.text(
+            Pos2::new(pos.x - 50.0, pos.y),
+            egui::Align2::RIGHT_CENTER,
+            "REC",
+            egui::FontId::proportional(14.0),
+            color,
+        );
+    }
+    
+    pub fn draw_confidence_bar(
+        &self,
+        ui: &mut egui::Ui,
+        label: &str,
+        value: f32,
+    ) {
+        ui.horizontal(|ui| {
+            ui.label(label);
+            
+            let bar_width = 200.0;
+            let bar_height = 20.0;
+            let rect = ui.allocate_space(Vec2::new(bar_width, bar_height)).1;
+            
+            let painter = ui.painter();
+            
+            // Background
+            painter.rect_filled(
+                rect,
+                egui::Rounding::same(4.0),
+                self.theme.surface,
+            );
+            
+            // Fill
+            let fill_width = bar_width * value;
+            let fill_rect = Rect::from_min_size(
+                rect.min,
+                Vec2::new(fill_width, bar_height),
+            );
+            
+            let color = if value > 0.7 {
+                self.theme.success
+            } else if value > 0.4 {
+                self.theme.warning
+            } else {
+                self.theme.error
+            };
+            
+            painter.rect_filled(
+                fill_rect,
+                egui::Rounding::same(4.0),
+                color,
+            );
+            
+            // Text
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("{:.0}%", value * 100.0),
+                egui::FontId::proportional(12.0),
+                self.theme.text_primary,
+            );
+        });
+    }
+}
+
+fn draw_arc(
+    painter: &egui::Painter,
+    center: Pos2,
+    radius: f32,
+    start_angle: f32,
+    end_angle: f32,
+    color: Color32,
+    thickness: f32,
+) {
+    let points_count = ((end_angle - start_angle).abs() * 50.0) as usize;
+    let mut points = Vec::with_capacity(points_count);
+    
+    for i in 0..=points_count {
+        let t = i as f32 / points_count as f32;
+        let angle = start_angle + (end_angle - start_angle) * t;
+        let x = center.x + radius * angle.cos();
+        let y = center.y + radius * angle.sin();
+        points.push(Pos2::new(x, y));
+    }
+    
+    for i in 1..points.len() {
+        painter.line_segment(
+            [points[i - 1], points[i]],
+            Stroke::new(thickness, color),
+        );
+    }
+}
+
+fn load_svg_as_rgba(path: &str, size: u32) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let svg_data = std::fs::read_to_string(path)?;
+    let opt = usvg::Options::default();
+    let tree = usvg::Tree::from_str(&svg_data, &opt)?;
+    
+    // Use resvg's re-exported tiny_skia types
+    let pixmap_size = tree.size.to_int_size();
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(size, size).unwrap();
+    
+    let scale = size as f32 / pixmap_size.width().max(pixmap_size.height()) as f32;
+    let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+    
+    // Use the Tree's render method directly with consistent types
+    resvg::Tree::from_usvg(&tree).render(transform, &mut pixmap.as_mut());
+    
+    Ok(pixmap.data().to_vec())
+}
+
+fn load_logo_image() -> Result<DynamicImage, image::ImageError> {
+    // This is now a fallback
+    Ok(DynamicImage::new_rgba8(128, 128))
+}
+
+// Custom widget for video display
+pub struct VideoWidget {
+    texture_id: Option<egui::TextureId>,
+    aspect_ratio: f32,
+}
+
+impl VideoWidget {
+    pub fn new() -> Self {
+        Self {
+            texture_id: None,
+            aspect_ratio: 16.0 / 9.0,
+        }
+    }
+    
+    pub fn update_frame(&mut self, ctx: &egui::Context, frame: &DynamicImage) {
+        // Convert image to egui texture
+        let size = [frame.width() as _, frame.height() as _];
+        let rgba = frame.to_rgba8();
+        let pixels = rgba.as_flat_samples();
+        
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+            size,
+            pixels.as_slice(),
+        );
+        
+        self.texture_id = Some(ctx.load_texture(
+            "video_frame",
+            color_image,
+            Default::default(),
+        ).id());
+    }
+    
+    pub fn show(&self, ui: &mut egui::Ui) {
+        let available_size = ui.available_size();
+        let widget_width = available_size.x;
+        let widget_height = widget_width / self.aspect_ratio;
+        
+        let size = Vec2::new(widget_width, widget_height);
+        let (rect, _response) = ui.allocate_exact_size(size, egui::Sense::hover());
+        
+        if let Some(texture_id) = self.texture_id {
+            ui.painter().image(
+                texture_id,
+                rect,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        } else {
+            ui.painter().rect_filled(
+                rect,
+                egui::Rounding::same(4.0),
+                Color32::from_rgb(50, 50, 55),
+            );
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "No Video Signal",
+                egui::FontId::proportional(16.0),
+                Color32::from_rgb(150, 150, 155),
+            );
+        }
+    }
+}
+
+================================================================================
+FILE: video.rs
+================================================================================
+
+// src/video.rs - Fixed version
+use std::path::{Path, PathBuf};
+use anyhow::Result;
+use image::{DynamicImage, ImageBuffer};
+use nokhwa::pixel_format::RgbFormat;
+use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
+use nokhwa::Camera;
+use std::sync::{Arc, Mutex};
+
+pub enum VideoSource {
+    Camera(Arc<Mutex<Camera>>),
+    File(PathBuf, VideoInfo),
+}
+
+#[derive(Debug, Clone)]
+pub struct VideoInfo {
+    pub path: PathBuf,
+    pub fps: f64,
+    pub frame_count: i32,
+    pub width: i32,
+    pub height: i32,
+    pub current_frame: i32,
+}
+
+impl VideoSource {
+    pub fn new_camera(index: i32) -> Result<Self> {
+    eprintln!("DEBUG: Attempting to open camera index {}", index);
+    
+    let camera_index = CameraIndex::Index(index as u32);
+    let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
+    
+    eprintln!("DEBUG: Creating camera object...");
+    let camera = Camera::new(camera_index, requested)
+        .map_err(|e| {
+            eprintln!("DEBUG: Failed to create camera: {}", e);
+            anyhow::anyhow!("Failed to open camera: {}", e)
+        })?;
+    
+    eprintln!("DEBUG: Camera created successfully");
+    Ok(VideoSource::Camera(Arc::new(Mutex::new(camera))))
+    }
+    
+    pub fn new_file(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let info = VideoInfo {
+            path: path.clone(),
+            fps: 30.0,
+            frame_count: 1000,
+            width: 1280,
+            height: 720,
+            current_frame: 0,
+        };
+        Ok(VideoSource::File(path, info))
+    }
+    
+    pub fn read_frame(&mut self) -> Result<DynamicImage> {
+        match self {
+            VideoSource::Camera(camera) => {
+                let mut cam = camera.lock().unwrap();
+                
+                // Open stream if not already open
+                if !cam.is_stream_open() {
+                    cam.open_stream()
+                        .map_err(|e| anyhow::anyhow!("Failed to open camera stream: {}", e))?;
+                }
+                
+                // Capture frame
+                let frame = cam.frame()
+                    .map_err(|e| anyhow::anyhow!("Failed to capture frame: {}", e))?;
+                
+                // Get frame data
+                let decoded = frame.decode_image::<RgbFormat>()
+                    .map_err(|e| anyhow::anyhow!("Failed to decode frame: {}", e))?;
+                
+                // Convert to DynamicImage
+                let width = decoded.width();
+                let height = decoded.height();
+                let rgb_data = decoded.into_vec();  // Changed from into_flat_vec()
+                
+                // Convert RGB to RGBA
+                let mut rgba_data = Vec::with_capacity((width * height * 4) as usize);
+                for chunk in rgb_data.chunks(3) {
+                    rgba_data.push(chunk[0]);
+                    rgba_data.push(chunk[1]);
+                    rgba_data.push(chunk[2]);
+                    rgba_data.push(255);
+                }
+                
+                let img = ImageBuffer::from_raw(width, height, rgba_data)
+                    .ok_or_else(|| anyhow::anyhow!("Failed to create image buffer"))?;
+                
+                Ok(DynamicImage::ImageRgba8(img))
+            }
+            VideoSource::File(_, _) => {
+                // For file playback, return a placeholder for now
+                Ok(DynamicImage::new_rgba8(1280, 720))
+            }
+        }
+    }
+    
+    pub fn get_info(&self) -> Option<VideoInfo> {
+        match self {
+            VideoSource::Camera(camera) => {
+                let cam = camera.lock().unwrap();
+                let resolution = cam.resolution();
+                Some(VideoInfo {
+                    path: PathBuf::from("camera://0"),
+                    fps: cam.frame_rate() as f64,
+                    frame_count: -1, // Infinite for camera
+                    width: resolution.width() as i32,
+                    height: resolution.height() as i32,
+                    current_frame: 0,
+                })
+            }
+            VideoSource::File(_, info) => Some(info.clone()),
+        }
+    }
+    
+    pub fn seek(&mut self, frame_number: i32) -> Result<()> {
+        if let VideoSource::File(_, ref mut info) = self {
+            info.current_frame = frame_number;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for VideoSource {
+    fn drop(&mut self) {
+        if let VideoSource::Camera(camera) = self {
+            if let Ok(mut cam) = camera.lock() {
+                let _ = cam.stop_stream();
+            }
+        }
+    }
+}
+
+pub struct VideoRecorder {
+    output_path: PathBuf,
+    fps: f64,
+    frame_count: i32,
+    frames: Vec<DynamicImage>,
+}
+
+impl VideoRecorder {
+    pub fn new(
+        output_path: impl AsRef<Path>,
+        _width: i32,
+        _height: i32,
+        fps: f64,
+    ) -> Result<Self> {
+        let path = output_path.as_ref().to_path_buf();
+        
+        // Ensure output directory exists
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        
+        Ok(Self {
+            output_path: path,
+            fps,
+            frame_count: 0,
+            frames: Vec::new(),
+        })
+    }
+    
+    pub fn write_frame(&mut self, frame: &DynamicImage) -> Result<()> {
+        self.frames.push(frame.clone());
+        self.frame_count += 1;
+        Ok(())
+    }
+    
+    pub fn finalize(self) -> Result<PathBuf> {
+        // For demo, save frames as individual images
+        if let Some(parent) = self.output_path.parent() {
+            for (i, frame) in self.frames.iter().enumerate() {
+                let path = parent.join(format!("frame_{:04}.png", i));
+                frame.save(&path)?;
+            }
+        }
+        Ok(self.output_path)
+    }
+    
+    pub fn get_frame_count(&self) -> i32 {
+        self.frame_count
+    }
+    
+    pub fn get_duration(&self) -> f64 {
+        self.frame_count as f64 / self.fps
+    }
+}
