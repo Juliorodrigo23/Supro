@@ -396,7 +396,7 @@ fn process_hand_landmarks(&mut self, hand_landmarks: &[[f64; 3]], hand_index: us
                      hand_index, dist_left.min(dist_right));
             
             // FALLBACK: Use x-position if distances too large
-            if wrist_pos.x < 0.5 { "right" } else { "left" }
+            if wrist_pos.x > 0.5 { "right" } else { "left" }
         } else {
             if dist_left < dist_right { "left" } else { "right" }
         }
@@ -406,7 +406,7 @@ fn process_hand_landmarks(&mut self, hand_landmarks: &[[f64; 3]], hand_index: us
                  result.joints.contains_key("right_wrist"));
         
         // FALLBACK: Use x-position
-        if wrist_pos.x < 0.5 { "right" } else { "left" }
+        if wrist_pos.x > 0.5 { "right" } else { "left" }
     };
     
     eprintln!("Hand {} assigned to {} side", hand_index, side);

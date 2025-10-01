@@ -128,22 +128,17 @@ impl Default for AppSettings {
 
 impl ArmTrackerApp {
 
-     fn render_video_panel_with_overlay(&mut self, ui: &mut egui::Ui, with_overlay: bool) {
-    // Use a fixed aspect ratio and reserve space in the normal layout flow
-    // so that later widgets won't overlap this area.
+fn render_video_panel_with_overlay(&mut self, ui: &mut egui::Ui, with_overlay: bool) {
     let max_w = ui.available_width();
     let aspect = 16.0 / 9.0;
     let display_w = (max_w - 20.0).max(240.0);
     let display_h = (display_w / aspect).clamp(160.0, 420.0);
 
-    // Reserve space & get a response/rect to paint into (advances layout!)
     let (rect, _resp) = ui.allocate_exact_size(egui::vec2(display_w, display_h), egui::Sense::hover());
 
-    // Background (helps when no frame is available)
     ui.painter().rect_filled(rect, egui::Rounding::same(8.0), egui::Color32::from_rgb(28, 28, 34));
 
-    if let Some(texture_id) = self.get_current_frame_texture(with_overlay) {
-        // Draw the frame
+    if let Some(texture_id) = self.get_current_frame_texture() {  // Remove parameter
         ui.painter().image(
             texture_id,
             rect,
@@ -151,13 +146,11 @@ impl ArmTrackerApp {
             egui::Color32::WHITE,
         );
 
-        // Optional overlay (skeleton / landmarks)
+        // Draw overlay if requested and tracking is active
         if with_overlay && !self.current_result.tracking_lost {
-            // ---- your existing overlay drawing code here, using `rect` ----
-            // e.g., lines, circles scaled by rect.width()/rect.height()
+            self.draw_tracking_overlay(ui, rect);
         }
     } else {
-        // Placeholder
         ui.painter().rect_stroke(rect, egui::Rounding::same(8.0), egui::Stroke::new(1.0, egui::Color32::from_gray(100)));
         ui.painter().text(
             rect.center(),
@@ -245,6 +238,9 @@ impl ArmTrackerApp {
         // Stop video source
         self.video_source = None;
         self.current_frame_texture = None;
+
+        self.current_result = TrackingResult::default();
+        self.last_valid_result = None;
         
         // Shutdown MediaPipe when camera stops
         if let Ok(mut tracker) = self.tracker.lock() {
@@ -544,7 +540,7 @@ impl ArmTrackerApp {
                     egui::Color32::from_rgb(28, 28, 34)
                 );
                 
-                if let Some(texture_id) = self.get_current_frame_texture(false) {
+                if let Some(texture_id) = self.get_current_frame_texture() {
                     ui.painter().image(
                         texture_id,
                         rect,
@@ -584,7 +580,7 @@ impl ArmTrackerApp {
                     egui::Color32::from_rgb(28, 28, 34)
                 );
                 
-                if let Some(texture_id) = self.get_current_frame_texture(true) {
+                if let Some(texture_id) = self.get_current_frame_texture() {
                     ui.painter().image(
                         texture_id,
                         rect,
@@ -1039,7 +1035,7 @@ fn draw_tracking_overlay(&self, ui: &mut egui::Ui, rect: egui::Rect) {
 }
 
     
-    fn get_current_frame_texture(&self, _with_overlay: bool) -> Option<egui::TextureId> {
+    fn get_current_frame_texture(&self) -> Option<egui::TextureId> {
         self.current_frame_texture.as_ref().map(|t| t.id())
     }
     
@@ -2247,7 +2243,7 @@ fn process_hand_landmarks(&mut self, hand_landmarks: &[[f64; 3]], hand_index: us
                      hand_index, dist_left.min(dist_right));
             
             // FALLBACK: Use x-position if distances too large
-            if wrist_pos.x < 0.5 { "right" } else { "left" }
+            if wrist_pos.x > 0.5 { "right" } else { "left" }
         } else {
             if dist_left < dist_right { "left" } else { "right" }
         }
@@ -2257,7 +2253,7 @@ fn process_hand_landmarks(&mut self, hand_landmarks: &[[f64; 3]], hand_index: us
                  result.joints.contains_key("right_wrist"));
         
         // FALLBACK: Use x-position
-        if wrist_pos.x < 0.5 { "right" } else { "left" }
+        if wrist_pos.x > 0.5 { "right" } else { "left" }
     };
     
     eprintln!("Hand {} assigned to {} side", hand_index, side);
@@ -2490,6 +2486,7 @@ fn process_hand_landmarks(&mut self, hand_landmarks: &[[f64; 3]], hand_index: us
     }
 
 
+// In tracking.rs, update the process_frame method around line 500:
 pub fn process_frame(&mut self, frame: &DynamicImage) -> Result<TrackingResult> {
     let mut result = TrackingResult::default();
     result.timestamp = self.sim_time;
@@ -2502,27 +2499,29 @@ pub fn process_frame(&mut self, frame: &DynamicImage) -> Result<TrackingResult> 
                 if mp_result.pose_landmarks.len() > 16 {
                     self.process_pose_with_kalman(&mp_result.pose_landmarks, &mut result);
                     
-                    // ALWAYS process hands when detected - remove confidence gate
                     for (i, hand_lms) in mp_result.hand_landmarks.iter().enumerate() {
                         self.process_hand_landmarks(hand_lms, i, &mut result);
                     }
                     
-                    // Hand cache logic (only for 1 frame)
-                    for side in ["left", "right"] {
-                        if !result.hands.contains_key(side) {
-                            if let Some((cached_hand, frames_old)) = self.hand_state_cache.get_mut(side) {
-                                if *frames_old < 1 {
-                                    if result.joints.contains_key(&format!("{}_wrist", side)) {
-                                        result.hands.insert(side.to_string(), cached_hand.clone());
-                                        *frames_old += 1;
-                                    } else {
-                                        self.hand_state_cache.remove(side);
-                                    }
-                                } else {
-                                    self.hand_state_cache.remove(side);
-                                }
+                    // Keep gestures from last_valid_gestures if not detected this frame
+                    if result.left_gesture.is_none() {
+                        if let Some(last_gesture) = self.last_valid_gestures.get("left") {
+                            if last_gesture.gesture_type != GestureType::None {
+                                result.left_gesture = Some(last_gesture.clone());
                             }
                         }
+                    } else if let Some(gesture) = &result.left_gesture {
+                        self.last_valid_gestures.insert("left".to_string(), gesture.clone());
+                    }
+                    
+                    if result.right_gesture.is_none() {
+                        if let Some(last_gesture) = self.last_valid_gestures.get("right") {
+                            if last_gesture.gesture_type != GestureType::None {
+                                result.right_gesture = Some(last_gesture.clone());
+                            }
+                        }
+                    } else if let Some(gesture) = &result.right_gesture {
+                        self.last_valid_gestures.insert("right".to_string(), gesture.clone());
                     }
                     
                     result.tracking_lost = false;

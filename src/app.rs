@@ -224,6 +224,9 @@ fn render_video_panel_with_overlay(&mut self, ui: &mut egui::Ui, with_overlay: b
         // Stop video source
         self.video_source = None;
         self.current_frame_texture = None;
+
+        self.current_result = TrackingResult::default();
+        self.last_valid_result = None;
         
         // Shutdown MediaPipe when camera stops
         if let Ok(mut tracker) = self.tracker.lock() {
