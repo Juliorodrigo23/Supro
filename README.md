@@ -1,6 +1,8 @@
 # Supro Arm Tracker
 
-An Arm Rotation Tracking System by Julio Contreras — Under Dr. Ortiz's Research Lab [cite: 54, 55]
+An Arm Rotation Tracking System by Julio Contreras — Under Dr. Ortiz's Research Lab 
+
+![Supro Logo](SuproLogo.gif)
 
 Supro Arm Tracker is a sophisticated motion tracking application built in Rust for analyzing forearm rotation patterns (supination and pronation) in real-time from a webcam or pre-recorded video files. It uses Google's MediaPipe for robust skeleton and hand tracking, combined with custom algorithms and Kalman filters for smooth and accurate gesture analysis.
 
