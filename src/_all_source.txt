@@ -2118,37 +2118,42 @@ fn process_hand_landmarks(&mut self, hand_landmarks: &[[f64; 3]], hand_index: us
         .collect();
     
     let wrist_pos = landmarks[0];
-
-    // Determine which hand based on wrist position relative to body center
-    // In camera view: lower x values (< 0.5) are typically on the right side of screen (person's right hand)
-    // higher x values (> 0.5) are typically on the left side of screen (person's left hand)
-    // BUT from the person's perspective facing the camera, it's the opposite
     
-        let side = if result.joints.contains_key("left_wrist") && 
+    // Try to match to wrist joints first (strictest)
+    let side = if result.joints.contains_key("left_wrist") && 
                 result.joints.contains_key("right_wrist") {
-            let left_wrist = &result.joints["left_wrist"].position;
-            let right_wrist = &result.joints["right_wrist"].position;
+        let left_wrist = &result.joints["left_wrist"].position;
+        let right_wrist = &result.joints["right_wrist"].position;
+        
+        let dist_left = (wrist_pos - left_wrist).norm();
+        let dist_right = (wrist_pos - right_wrist).norm();
+        
+        eprintln!("Hand {} distances - left: {:.3}, right: {:.3}", hand_index, dist_left, dist_right);
+        
+        // Increased threshold - MediaPipe coordinates are 0-1 range
+        const MAX_HAND_ARM_DISTANCE: f64 = 0.3; // DOUBLED from 0.15
+        
+        if dist_left.min(dist_right) > MAX_HAND_ARM_DISTANCE {
+            eprintln!("Hand {} too far from wrists (min dist: {:.3}), trying position fallback", 
+                     hand_index, dist_left.min(dist_right));
             
-            let dist_left = (wrist_pos - left_wrist).norm();
-            let dist_right = (wrist_pos - right_wrist).norm();
-            
-            // Add distance threshold for validity
-            const MAX_HAND_ARM_DISTANCE: f64 = 0.15; // Adjust based on your coordinate system
-            
-            if dist_left.min(dist_right) > MAX_HAND_ARM_DISTANCE {
-                eprintln!("Hand {} too far from any arm joint, skipping", hand_index);
-                return;  // Skip this hand entirely
-            }
-            
-            if dist_left < dist_right { "left" } else { "right" }
+            // FALLBACK: Use x-position if distances too large
+            if wrist_pos.x < 0.5 { "right" } else { "left" }
         } else {
-            // If no arm joints, don't guess - skip this hand
-            eprintln!("No arm joints available, cannot assign hand {}", hand_index);
-            return;
-        };
+            if dist_left < dist_right { "left" } else { "right" }
+        }
+    } else {
+        eprintln!("Missing wrist joints - left: {}, right: {}", 
+                 result.joints.contains_key("left_wrist"),
+                 result.joints.contains_key("right_wrist"));
+        
+        // FALLBACK: Use x-position
+        if wrist_pos.x < 0.5 { "right" } else { "left" }
+    };
     
-    eprintln!("DEBUG: Hand {} at x={:.2} assigned to {} side", hand_index, wrist_pos.x, side);
-
+    eprintln!("Hand {} assigned to {} side", hand_index, side);
+    
+    // Rest of your code unchanged...
     let filters = self.get_or_create_hand_filters(side);
     let mut smoothed_landmarks = Vec::new();
     
@@ -2160,14 +2165,13 @@ fn process_hand_landmarks(&mut self, hand_landmarks: &[[f64; 3]], hand_index: us
     }
 
     let hand_state = HandState {
-        landmarks: smoothed_landmarks.clone(),  // Use smoothed landmarks
+        landmarks: smoothed_landmarks.clone(),
         confidences: vec![1.0; smoothed_landmarks.len()],
         is_tracked: true,
     };
     
     self.hand_state_cache.insert(side.to_string(), (hand_state.clone(), 0));
     result.hands.insert(side.to_string(), hand_state);
-
     
     // Calculate gesture if we have arm joints
     if result.joints.contains_key(&format!("{}_shoulder", side)) &&
@@ -2183,7 +2187,7 @@ fn process_hand_landmarks(&mut self, hand_landmarks: &[[f64; 3]], hand_index: us
             shoulder,
             elbow,
             wrist,
-            Some(&smoothed_landmarks)  // Use smoothed landmarks
+            Some(&smoothed_landmarks)
         ) {
             if side == "left" {
                 result.left_gesture = Some(gesture);

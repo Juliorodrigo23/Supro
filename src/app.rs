@@ -112,57 +112,45 @@ impl Default for AppSettings {
 impl ArmTrackerApp {
 
      fn render_video_panel_with_overlay(&mut self, ui: &mut egui::Ui, with_overlay: bool) {
-        let available_size = ui.available_size();
-        
-        if let Some(texture_id) = self.get_current_frame_texture(with_overlay) {
-            // Calculate aspect ratio from actual frame dimensions
-            let aspect_ratio = if let Some(src) = &self.video_source {
-                if let Some(info) = src.get_info() {
-                    info.width as f32 / info.height as f32
-                } else {
-                    4.0 / 3.0  // Default for 640x480
-                }
-            } else {
-                4.0 / 3.0
-            };
-            
-            // Fit to available space while maintaining aspect ratio
-            let display_width = available_size.x - 20.0;
-            let display_height = display_width / aspect_ratio;
-            
-            // Center the video if there's extra vertical space
-            let vertical_offset = ((available_size.y - display_height) / 2.0).max(0.0);
-            
-            ui.allocate_ui_at_rect(
-                egui::Rect::from_min_size(
-                    ui.cursor().min + egui::vec2(10.0, vertical_offset),
-                    egui::vec2(display_width, display_height),
-                ),
-                |ui| {
-                    let response = ui.allocate_response(
-                        egui::vec2(display_width, display_height),
-                        egui::Sense::hover()
-                    );
-                    
-                    ui.painter().image(
-                        texture_id,
-                        response.rect,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        egui::Color32::WHITE,
-                    );
-                    
-                    // Draw overlay...
-                    if with_overlay && !self.current_result.tracking_lost {
-                        // ... existing overlay code
-                    }
-                }
-            );
-        } else {
-            ui.centered_and_justified(|ui| {
-                ui.label("No video feed available");
-            });
+    // Use a fixed aspect ratio and reserve space in the normal layout flow
+    // so that later widgets won't overlap this area.
+    let max_w = ui.available_width();
+    let aspect = 16.0 / 9.0;
+    let display_w = (max_w - 20.0).max(240.0);
+    let display_h = (display_w / aspect).clamp(160.0, 420.0);
+
+    // Reserve space & get a response/rect to paint into (advances layout!)
+    let (rect, _resp) = ui.allocate_exact_size(egui::vec2(display_w, display_h), egui::Sense::hover());
+
+    // Background (helps when no frame is available)
+    ui.painter().rect_filled(rect, egui::Rounding::same(8.0), egui::Color32::from_rgb(28, 28, 34));
+
+    if let Some(texture_id) = self.get_current_frame_texture(with_overlay) {
+        // Draw the frame
+        ui.painter().image(
+            texture_id,
+            rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+
+        // Optional overlay (skeleton / landmarks)
+        if with_overlay && !self.current_result.tracking_lost {
+            // ---- your existing overlay drawing code here, using `rect` ----
+            // e.g., lines, circles scaled by rect.width()/rect.height()
         }
+    } else {
+        // Placeholder
+        ui.painter().rect_stroke(rect, egui::Rounding::same(8.0), egui::Stroke::new(1.0, egui::Color32::from_gray(100)));
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "No video feed",
+            egui::FontId::proportional(16.0),
+            egui::Color32::from_gray(180),
+        );
     }
+}
 
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let tracker = Arc::new(Mutex::new(
@@ -334,73 +322,82 @@ impl ArmTrackerApp {
         }
     }
 
-    fn render_header(&mut self, ctx: &egui::Context) {
+   fn render_header(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
-            ui.add_space(10.0);
+            ui.add_space(8.0);
             egui::menu::bar(ui, |ui| {
-                // Logo and title
+                // Left area: Logo + Titles + Byline
                 ui.horizontal(|ui| {
                     if let Some(logo) = self.ui_components.logo_texture.as_ref() {
-                        ui.image((logo.id(), egui::vec2(40.0, 40.0)));
+                        // Bigger logo (was 40x40 → now 64x64)
+                        ui.image((logo.id(), egui::vec2(64.0, 64.0)));
                     }
-                    ui.heading("Arm Rotation Tracking System");
+
+                    ui.vertical(|ui| {
+                        // Main title now uses “Supro”
+                        ui.heading("Supro Arm Tracker");
+
+                        // Subtitle / section title row (optional small tagline)
+                        ui.add_space(2.0);
+                        ui.label(
+                            egui::RichText::new("Arm Rotation Tracking System")
+                                .italics()
+                                .size(14.0)
+                                .color(egui::Color32::LIGHT_GRAY),
+                        );
+
+                        // Byline
+                        ui.add_space(2.0);
+                        ui.label(
+                            egui::RichText::new("By Julio Contreras — Under Dr. Ortiz's Research Lab")
+                                .size(13.0)
+                                .color(egui::Color32::WHITE),
+                        );
+                    });
                 });
-                
+
                 ui.separator();
-                
+
                 // Mode selection
                 ui.horizontal(|ui| {
                     let old_mode = self.mode;
-                    
+
                     ui.selectable_value(&mut self.mode, AppMode::Live, "🎥 Live Camera");
                     ui.selectable_value(&mut self.mode, AppMode::VideoFile, "📁 Video File");
                     ui.selectable_value(&mut self.mode, AppMode::Playback, "📊 Analysis");
-                    
-                    // Handle mode changes
+
                     if self.mode != old_mode {
                         self.on_mode_changed(old_mode, self.mode);
                     }
                 });
-                
+
                 ui.separator();
-                
+
                 // View mode buttons
                 ui.horizontal(|ui| {
-                    if ui.selectable_label(
-                        self.view_mode == ViewMode::SingleCamera,
-                        "Single View"
-                    ).clicked() {
+                    if ui.selectable_label(self.view_mode == ViewMode::SingleCamera, "Single View").clicked() {
                         self.view_mode = ViewMode::SingleCamera;
                     }
-                    
-                    if ui.selectable_label(
-                        self.view_mode == ViewMode::DualView,
-                        "Dual View"
-                    ).clicked() {
+
+                    if ui.selectable_label(self.view_mode == ViewMode::DualView, "Dual View").clicked() {
                         self.view_mode = ViewMode::DualView;
                     }
-                    
-                    if ui.selectable_label(
-                        self.view_mode == ViewMode::DataAnalysis,
-                        "Data Analysis"
-                    ).clicked() {
+
+                    if ui.selectable_label(self.view_mode == ViewMode::DataAnalysis, "Data Analysis").clicked() {
                         self.view_mode = ViewMode::DataAnalysis;
                     }
                 });
-                
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Settings button
                     if ui.button("⚙ Settings").clicked() {
                         self.show_settings = !self.show_settings;
                     }
-                    
-                    // About button
                     if ui.button("ℹ About").clicked() {
                         self.show_about = !self.show_about;
                     }
                 });
             });
-            ui.add_space(10.0);
+            ui.add_space(6.0);
         });
     }
     
@@ -489,51 +486,115 @@ impl ArmTrackerApp {
     }
     
     fn render_dual_view(&mut self, ui: &mut egui::Ui) {
-        // Top section - Video panels
+        // Top row: two video panels side-by-side with EQUAL sizes
         ui.horizontal(|ui| {
-            let available_width = ui.available_width();
-            let panel_width = available_width / 2.0 - 10.0;
+            let avail_w = ui.available_width();
+            let panel_w = (avail_w - 20.0) / 2.0;
             
-            // Raw feed panel
-            ui.allocate_ui(egui::vec2(panel_width, 400.0), |ui| {
+            // Fixed aspect ratio for consistent sizing
+            let aspect = 16.0 / 9.0;
+            let video_display_h = (panel_w / aspect).clamp(180.0, 360.0);
+
+            // Left panel - Raw Feed
+            ui.vertical(|ui| {
+                ui.set_width(panel_w);
                 ui.group(|ui| {
                     ui.heading("Raw Feed");
-                    self.render_video_panel(ui, false);
+                    ui.add_space(6.0);
+                    
+                    // Allocate exact size for video
+                    let (rect, _resp) = ui.allocate_exact_size(
+                        egui::vec2(panel_w - 20.0, video_display_h), 
+                        egui::Sense::hover()
+                    );
+                    
+                    ui.painter().rect_filled(
+                        rect, 
+                        egui::Rounding::same(8.0), 
+                        egui::Color32::from_rgb(28, 28, 34)
+                    );
+                    
+                    if let Some(texture_id) = self.get_current_frame_texture(false) {
+                        ui.painter().image(
+                            texture_id,
+                            rect,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
+                    } else {
+                        ui.painter().text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "No video feed",
+                            egui::FontId::proportional(16.0),
+                            egui::Color32::from_gray(180),
+                        );
+                    }
                 });
             });
-            
+
             ui.add_space(20.0);
-            
-            // Tracking overlay panel
-            ui.allocate_ui(egui::vec2(panel_width, 400.0), |ui| {
+
+            // Right panel - Tracking Overlay
+            ui.vertical(|ui| {
+                ui.set_width(panel_w);
                 ui.group(|ui| {
                     ui.heading("Tracking Overlay");
-                    self.render_video_panel(ui, true);
+                    ui.add_space(6.0);
+                    
+                    // Allocate exact same size for video
+                    let (rect, _resp) = ui.allocate_exact_size(
+                        egui::vec2(panel_w - 20.0, video_display_h), 
+                        egui::Sense::hover()
+                    );
+                    
+                    ui.painter().rect_filled(
+                        rect, 
+                        egui::Rounding::same(8.0), 
+                        egui::Color32::from_rgb(28, 28, 34)
+                    );
+                    
+                    if let Some(texture_id) = self.get_current_frame_texture(true) {
+                        ui.painter().image(
+                            texture_id,
+                            rect,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
+                        
+                        // Draw tracking overlay
+                        if !self.current_result.tracking_lost {
+                            self.draw_tracking_overlay(ui, rect);
+                        }
+                    } else {
+                        ui.painter().text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "No video feed",
+                            egui::FontId::proportional(16.0),
+                            egui::Color32::from_gray(180),
+                        );
+                    }
                 });
             });
         });
-        
+
+        ui.add_space(10.0);
         ui.separator();
         ui.add_space(10.0);
-        
-        // Bottom section - Rotation info
-        ui.horizontal(|ui| {
-            let available_width = ui.available_width();
-            let panel_width = available_width / 2.0 - 10.0;
-            
-            // Left arm info
-            ui.allocate_ui(egui::vec2(panel_width, 200.0), |ui| {
-                self.render_arm_rotation_panel(ui, "left");
-            });
-            
-            ui.add_space(20.0);
-            
-            // Right arm info
-            ui.allocate_ui(egui::vec2(panel_width, 200.0), |ui| {
-                self.render_arm_rotation_panel(ui, "right");
+
+        // Bottom: merged rotation box with DYNAMIC heights
+        ui.group(|ui| {
+            ui.heading("Arm Rotation");
+            ui.add_space(6.0);
+            ui.vertical(|ui| {
+                self.render_arm_rotation_panel_dynamic(ui, "left");
+                ui.add_space(8.0);
+                self.render_arm_rotation_panel_dynamic(ui, "right");
             });
         });
     }
+    
     
     fn render_analysis_view(&mut self, ui: &mut egui::Ui) {
         ui.heading("Data Analysis");
@@ -566,143 +627,9 @@ impl ArmTrackerApp {
     }
     
     fn render_video_panel(&mut self, ui: &mut egui::Ui, with_overlay: bool) {
-        let available_size = ui.available_size();
-        
-        if let Some(texture_id) = self.get_current_frame_texture(with_overlay) {
-            let aspect_ratio = 16.0 / 9.0;
-            let display_width = available_size.x - 20.0;
-            let display_height = display_width / aspect_ratio;
-            
-            ui.centered_and_justified(|ui| {
-                let response = ui.allocate_response(
-                    egui::vec2(display_width, display_height),
-                    egui::Sense::hover()
-                );
-                
-                // Draw the video frame first
-                ui.painter().image(
-                    texture_id,
-                    response.rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    egui::Color32::WHITE,
-                );
-                
-                // Now draw the overlay if requested
-                if with_overlay && !self.current_result.tracking_lost {
-                    let painter = ui.painter();
-                    let rect = response.rect;
-                    
-                    // Draw skeleton connections
-                    let connections = vec![
-                        ("left_shoulder", "left_elbow"),
-                        ("left_elbow", "left_wrist"),
-                        ("right_shoulder", "right_elbow"),
-                        ("right_elbow", "right_wrist"),
-                        ("left_shoulder", "right_shoulder"),
-                    ];
-                    
-                    for (from, to) in connections {
-                        if let (Some(from_joint), Some(to_joint)) = (
-                            self.current_result.joints.get(from),
-                            self.current_result.joints.get(to),
-                        ) {
-                            let from_pos = egui::pos2(
-                                rect.left() + from_joint.position.x as f32 * rect.width(),
-                                rect.top() + from_joint.position.y as f32 * rect.height(),
-                            );
-                            let to_pos = egui::pos2(
-                                rect.left() + to_joint.position.x as f32 * rect.width(),
-                                rect.top() + to_joint.position.y as f32 * rect.height(),
-                            );
-                            
-                            painter.line_segment(
-                                [from_pos, to_pos],
-                                egui::Stroke::new(3.0, egui::Color32::from_rgb(0, 255, 0)),
-                            );
-                        }
-                    }
-                    
-                    // Draw joints
-                    for (name, joint) in &self.current_result.joints {
-                        let pos = egui::pos2(
-                            rect.left() + joint.position.x as f32 * rect.width(),
-                            rect.top() + joint.position.y as f32 * rect.height(),
-                        );
-                        
-                        let color = if name.contains("left") {
-                            egui::Color32::from_rgb(255, 0, 0)
-                        } else {
-                            egui::Color32::from_rgb(0, 0, 255)
-                        };
-                        
-                        painter.circle_filled(pos, 8.0, color);
-                        painter.circle_stroke(pos, 10.0, egui::Stroke::new(2.0, egui::Color32::WHITE));
-                    }
-
-                    for (side, hand) in &self.current_result.hands {
-                        if !hand.is_tracked {
-                            continue;
-                        }
-                        
-                        let hand_color = if side == "left" {
-                            egui::Color32::from_rgb(255, 100, 100)
-                        } else {
-                            egui::Color32::from_rgb(100, 100, 255)
-                        };
-                        
-                        // Draw hand landmarks
-                        for (i, landmark) in hand.landmarks.iter().enumerate() {
-                            let pos = egui::pos2(
-                                rect.left() + landmark.x as f32 * rect.width(),
-                                rect.top() + landmark.y as f32 * rect.height(),
-                            );
-                            
-                            // Larger circle for wrist, smaller for other landmarks
-                            let radius = if i == 0 { 6.0 } else { 3.0 };
-                            painter.circle_filled(pos, radius, hand_color);
-                        }
-                        
-                        // Draw connections between finger joints
-                        let finger_connections = [
-                            // Thumb
-                            (0, 1), (1, 2), (2, 3), (3, 4),
-                            // Index
-                            (0, 5), (5, 6), (6, 7), (7, 8),
-                            // Middle
-                            (0, 9), (9, 10), (10, 11), (11, 12),
-                            // Ring
-                            (0, 13), (13, 14), (14, 15), (15, 16),
-                            // Pinky
-                            (0, 17), (17, 18), (18, 19), (19, 20),
-                        ];
-                        
-                        for (from, to) in finger_connections.iter() {
-                            if *from < hand.landmarks.len() && *to < hand.landmarks.len() {
-                                let from_pos = egui::pos2(
-                                    rect.left() + hand.landmarks[*from].x as f32 * rect.width(),
-                                    rect.top() + hand.landmarks[*from].y as f32 * rect.height(),
-                                );
-                                let to_pos = egui::pos2(
-                                    rect.left() + hand.landmarks[*to].x as f32 * rect.width(),
-                                    rect.top() + hand.landmarks[*to].y as f32 * rect.height(),
-                                );
-                                
-                                painter.line_segment(
-                                    [from_pos, to_pos],
-                                    egui::Stroke::new(2.0, hand_color.linear_multiply(0.7)),
-                                );
-                            }
-                        }
-                    }
-                }
-            });
-        } else {
-            ui.centered_and_justified(|ui| {
-                ui.label("No video feed available");
-                ui.label("Click 'Start Camera' to begin");
-            });
-        }
-    }
+    // Delegate to the unified version above that properly reserves layout space
+    self.render_video_panel_with_overlay(ui, with_overlay);
+}
     
     fn render_gesture_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
@@ -746,71 +673,233 @@ impl ArmTrackerApp {
         });
     }
     
-    fn render_arm_rotation_panel(&mut self, ui: &mut egui::Ui, side: &str) {
-        let gesture = if side == "left" {
-            self.current_result.left_gesture.as_ref()
-        } else {
-            self.current_result.right_gesture.as_ref()
-        };
-        
-        ui.group(|ui| {
-            ui.heading(format!("{} Arm", if side == "left" { "Left" } else { "Right" }));
+fn render_arm_rotation_panel_dynamic(&mut self, ui: &mut egui::Ui, side: &str) {
+    let gesture = if side == "left" {
+        self.current_result.left_gesture.as_ref()
+    } else {
+        self.current_result.right_gesture.as_ref()
+    };
+
+    ui.group(|ui| {
+        ui.horizontal(|ui| {
+            // Title on the left
+            ui.label(
+                egui::RichText::new(format!("{} Arm", if side == "left" { "Left" } else { "Right" }))
+                    .size(18.0)
+                    .strong()
+            );
             
-            if let Some(gesture) = gesture {
-                // Rotation type with colored background
-                let (bg_color, text_color) = match gesture.gesture_type {
-                    GestureType::Supination => (
-                        egui::Color32::from_rgb(76, 175, 80),
-                        egui::Color32::WHITE,
-                    ),
-                    GestureType::Pronation => (
-                        egui::Color32::from_rgb(255, 152, 0),
-                        egui::Color32::BLACK,
-                    ),
-                    GestureType::None => (
-                        egui::Color32::from_rgb(100, 100, 100),
-                        egui::Color32::WHITE,
-                    ),
-                };
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some(gesture) = gesture {
+                    // Display gesture type with colored badge
+                    let (bg_color, text_color, text) = match gesture.gesture_type {
+                        GestureType::Supination => (
+                            egui::Color32::from_rgb(76, 175, 80), 
+                            egui::Color32::WHITE,
+                            "Supination"
+                        ),
+                        GestureType::Pronation => (
+                            egui::Color32::from_rgb(255, 152, 0), 
+                            egui::Color32::BLACK,
+                            "Pronation"
+                        ),
+                        GestureType::None => (
+                            egui::Color32::from_rgb(100, 100, 100), 
+                            egui::Color32::WHITE,
+                            "None"
+                        ),
+                    };
+                    
+                    let badge = egui::Button::new(
+                        egui::RichText::new(text)
+                            .color(text_color)
+                            .size(16.0)
+                            .strong()
+                    )
+                    .fill(bg_color)
+                    .sense(egui::Sense::hover());
+                    
+                    ui.add(badge);
+                }
+            });
+        });
+        
+        ui.add_space(8.0);
+        
+        if let Some(gesture) = gesture {
+            // Show detailed information when gesture is detected
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("Confidence: {:.1}%", gesture.confidence * 100.0))
+                            .size(15.0)
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("Rotation Angle: {:.1}°", gesture.angle.to_degrees()))
+                            .size(15.0)
+                    );
+                });
                 
-                ui.allocate_ui(egui::vec2(ui.available_width(), 50.0), |ui| {
-                    let rect = ui.available_rect_before_wrap();
-                    ui.painter().rect_filled(
-                        rect,
-                        egui::Rounding::same(8.0),
-                        bg_color,
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Visual confidence meter
+                    let confidence_color = if gesture.confidence > 0.8 {
+                        egui::Color32::from_rgb(76, 175, 80)
+                    } else if gesture.confidence > 0.5 {
+                        egui::Color32::from_rgb(255, 193, 7)
+                    } else {
+                        egui::Color32::from_rgb(244, 67, 54)
+                    };
+                    
+                    let bar_width = 100.0;
+                    let bar_height = 20.0;
+                    let (rect, _response) = ui.allocate_exact_size(
+                        egui::vec2(bar_width, bar_height),
+                        egui::Sense::hover()
                     );
                     
-                    ui.centered_and_justified(|ui| {
-                        ui.label(
-                            egui::RichText::new(format!("{:?}", gesture.gesture_type))
-                                .size(24.0)
-                                .color(text_color)
-                        );
-                    });
-                });
-                
-                ui.add_space(10.0);
-                
-                // Confidence bar
-                ui.label("Confidence:");
-                ui.add(egui::ProgressBar::new(gesture.confidence as f32)
-                    .show_percentage()
-                    .animate(true));
-                
-                // Angle indicator
-                ui.label(format!("Rotation Angle: {:.1}°", gesture.angle.to_degrees()));
-            } else {
-                ui.centered_and_justified(|ui| {
-                    ui.label(
-                        egui::RichText::new("No rotation detected")
-                            .size(18.0)
-                            .color(egui::Color32::GRAY)
+                    // Background
+                    ui.painter().rect_filled(
+                        rect,
+                        egui::Rounding::same(4.0),
+                        egui::Color32::from_gray(60)
+                    );
+                    
+                    // Confidence bar
+                    let filled_width = bar_width * (gesture.confidence as f32);
+                    let filled_rect = egui::Rect::from_min_size(
+                        rect.min,
+                        egui::vec2(filled_width, bar_height)
+                    );
+                    ui.painter().rect_filled(
+                        filled_rect,
+                        egui::Rounding::same(4.0),
+                        confidence_color
                     );
                 });
-            }
-        });
+            });
+        } else {
+            // Compact display when no gesture detected
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("No rotation detected")
+                        .size(15.0)
+                        .color(egui::Color32::GRAY)
+                );
+            });
+        }
+        
+        ui.add_space(4.0);
+    });
+}
+
+fn draw_tracking_overlay(&self, ui: &mut egui::Ui, rect: egui::Rect) {
+    let painter = ui.painter();
+    
+    // Draw skeleton connections
+    let connections = vec![
+        ("left_shoulder", "left_elbow"),
+        ("left_elbow", "left_wrist"),
+        ("right_shoulder", "right_elbow"),
+        ("right_elbow", "right_wrist"),
+        ("left_shoulder", "right_shoulder"),
+    ];
+    
+    for (from, to) in connections {
+        if let (Some(from_joint), Some(to_joint)) = (
+            self.current_result.joints.get(from),
+            self.current_result.joints.get(to),
+        ) {
+            let from_pos = egui::pos2(
+                rect.left() + from_joint.position.x as f32 * rect.width(),
+                rect.top() + from_joint.position.y as f32 * rect.height(),
+            );
+            let to_pos = egui::pos2(
+                rect.left() + to_joint.position.x as f32 * rect.width(),
+                rect.top() + to_joint.position.y as f32 * rect.height(),
+            );
+            
+            painter.line_segment(
+                [from_pos, to_pos],
+                egui::Stroke::new(3.0, egui::Color32::from_rgb(0, 255, 0)),
+            );
+        }
     }
+    
+    // Draw joints
+    for (name, joint) in &self.current_result.joints {
+        let pos = egui::pos2(
+            rect.left() + joint.position.x as f32 * rect.width(),
+            rect.top() + joint.position.y as f32 * rect.height(),
+        );
+        
+        let color = if name.contains("left") {
+            egui::Color32::from_rgb(255, 0, 0)
+        } else {
+            egui::Color32::from_rgb(0, 0, 255)
+        };
+        
+        painter.circle_filled(pos, 8.0, color);
+        painter.circle_stroke(pos, 10.0, egui::Stroke::new(2.0, egui::Color32::WHITE));
+    }
+
+    // Draw hand landmarks and connections
+    for (side, hand) in &self.current_result.hands {
+        if !hand.is_tracked {
+            continue;
+        }
+        
+        let hand_color = if side == "left" {
+            egui::Color32::from_rgb(255, 100, 100)
+        } else {
+            egui::Color32::from_rgb(100, 100, 255)
+        };
+        
+        // Draw hand landmarks
+        for (i, landmark) in hand.landmarks.iter().enumerate() {
+            let pos = egui::pos2(
+                rect.left() + landmark.x as f32 * rect.width(),
+                rect.top() + landmark.y as f32 * rect.height(),
+            );
+            
+            // Larger circle for wrist, smaller for other landmarks
+            let radius = if i == 0 { 6.0 } else { 3.0 };
+            painter.circle_filled(pos, radius, hand_color);
+        }
+        
+        // Draw connections between finger joints
+        let finger_connections = [
+            // Thumb
+            (0, 1), (1, 2), (2, 3), (3, 4),
+            // Index
+            (0, 5), (5, 6), (6, 7), (7, 8),
+            // Middle
+            (0, 9), (9, 10), (10, 11), (11, 12),
+            // Ring
+            (0, 13), (13, 14), (14, 15), (15, 16),
+            // Pinky
+            (0, 17), (17, 18), (18, 19), (19, 20),
+        ];
+        
+        for (from, to) in finger_connections.iter() {
+            if *from < hand.landmarks.len() && *to < hand.landmarks.len() {
+                let from_pos = egui::pos2(
+                    rect.left() + hand.landmarks[*from].x as f32 * rect.width(),
+                    rect.top() + hand.landmarks[*from].y as f32 * rect.height(),
+                );
+                let to_pos = egui::pos2(
+                    rect.left() + hand.landmarks[*to].x as f32 * rect.width(),
+                    rect.top() + hand.landmarks[*to].y as f32 * rect.height(),
+                );
+                
+                painter.line_segment(
+                    [from_pos, to_pos],
+                    egui::Stroke::new(2.0, hand_color.linear_multiply(0.7)),
+                );
+            }
+        }
+    }
+}
+
     
     fn render_joint_panel(&mut self, ui: &mut egui::Ui) {
         // Implementation for joint tracking visualization
@@ -828,95 +917,87 @@ impl ArmTrackerApp {
     }
     
     fn render_control_panel(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::bottom("controls").show(ctx, |ui| {
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                // Only show camera controls in Live mode
-                if self.mode == AppMode::Live {
-                    if self.video_source.is_some() {
-                        if ui.add_sized(
-                            [120.0, 40.0],
-                            egui::Button::new("⏹ Stop Camera")
-                                .fill(egui::Color32::from_rgb(244, 67, 54))
-                        ).clicked() {
-                            self.stop_camera();
-                        }
-                        
-                        ui.separator();
-                        
-                        // Show MediaPipe status when camera is running
-                        self.render_tracking_status(ui);
-                    } else {
-                        if ui.add_sized(
-                            [120.0, 40.0],
-                            egui::Button::new("📷 Start Camera")
-                                .fill(egui::Color32::from_rgb(33, 150, 243))
-                        ).clicked() {
-                            self.start_camera();
-                        }
+    egui::TopBottomPanel::bottom("controls").show(ctx, |ui| {
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            // Camera controls (Live mode only)
+            if self.mode == AppMode::Live {
+                if self.video_source.is_some() {
+                    let stop_cam = egui::Button::new(
+                        egui::RichText::new("⏹ Stop Camera").color(egui::Color32::WHITE)
+                    ).fill(egui::Color32::from_rgb(244, 67, 54));
+                    if ui.add_sized([140.0, 40.0], stop_cam).clicked() {
+                        self.stop_camera();
                     }
-                    
+
                     ui.separator();
+                    self.render_tracking_status(ui);
+                } else {
+                    let start_cam = egui::Button::new(
+                        egui::RichText::new("📷 Start Camera").color(egui::Color32::WHITE)
+                    ).fill(egui::Color32::from_rgb(33, 150, 243));
+                    if ui.add_sized([140.0, 40.0], start_cam).clicked() {
+                        self.start_camera();
+                    }
                 }
-                
-                // Record button (only in Live or VideoFile mode)
-                if self.mode != AppMode::Playback {
-                    let record_btn = if self.is_recording {
-                        ui.add_sized(
-                            [120.0, 40.0],
-                            egui::Button::new("⏹ Stop Recording")
-                                .fill(egui::Color32::from_rgb(244, 67, 54))
-                        )
-                    } else {
-                        ui.add_sized(
-                            [120.0, 40.0],
-                            egui::Button::new("⏺ Record")
-                                .fill(egui::Color32::from_rgb(76, 175, 80))
-                        )
-                    };
-                    
-                    if record_btn.clicked() {
+                ui.separator();
+            }
+
+            // Record controls (hidden in Playback mode)
+            if self.mode != AppMode::Playback {
+                if self.is_recording {
+                    let stop_rec = egui::Button::new(
+                        egui::RichText::new("⏹ Stop Recording").color(egui::Color32::WHITE)
+                    ).fill(egui::Color32::from_rgb(244, 67, 54));
+                    if ui.add_sized([160.0, 40.0], stop_rec).clicked() {
                         self.toggle_recording();
                     }
-                    
-                    ui.separator();
-                }
-                
-                // Playback controls for video mode
-                if self.mode == AppMode::VideoFile {
-                    if ui.button(if self.is_playing { "⏸" } else { "▶" }).clicked() {
-                        self.is_playing = !self.is_playing;
+                } else {
+                    let start_rec = egui::Button::new(
+                        egui::RichText::new("⏺ Record").color(egui::Color32::WHITE)
+                    ).fill(egui::Color32::from_rgb(76, 175, 80));
+                    if ui.add_sized([140.0, 40.0], start_rec).clicked() {
+                        self.toggle_recording();
                     }
-                    
-                    ui.add(egui::Slider::new(&mut self.video_progress, 0.0..=100.0)
-                        .text("Progress")
-                        .suffix("%"));
-                    
-                    ui.separator();
                 }
-                
-                // Arm toggles (only in Live mode)
-                if self.mode == AppMode::Live {
-                    ui.checkbox(&mut self.settings.enable_left_arm, "Left Arm");
-                    ui.checkbox(&mut self.settings.enable_right_arm, "Right Arm");
-                    ui.checkbox(&mut self.settings.enable_fingers, "Fingers");
+                ui.separator();
+            }
+
+            // Video file playback controls
+            if self.mode == AppMode::VideoFile {
+                if ui.button(if self.is_playing { "⏸" } else { "▶" }).clicked() {
+                    self.is_playing = !self.is_playing;
                 }
-                
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if self.is_recording {
-                        let duration = self.recording_duration;
-                        let minutes = duration.as_secs() / 60;
-                        let seconds = duration.as_secs() % 60;
-                        ui.label(
-                            egui::RichText::new(format!("Recording: {:02}:{:02}", minutes, seconds))
-                                .color(egui::Color32::from_rgb(244, 67, 54))
-                        );
-                    }
-                });
+                ui.add(
+                    egui::Slider::new(&mut self.video_progress, 0.0..=100.0)
+                        .text("Progress").suffix("%")
+                );
+                ui.separator();
+            }
+
+            // Arm toggles (Live mode only)
+            if self.mode == AppMode::Live {
+                ui.checkbox(&mut self.settings.enable_left_arm, "Left Arm");
+                ui.checkbox(&mut self.settings.enable_right_arm, "Right Arm");
+                ui.checkbox(&mut self.settings.enable_fingers, "Fingers");
+            }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.is_recording {
+                    let duration = self.recording_duration;
+                    let minutes = duration.as_secs() / 60;
+                    let seconds = duration.as_secs() % 60;
+                    ui.label(
+                        egui::RichText::new(format!("Recording: {:02}:{:02}", minutes, seconds))
+                            .color(egui::Color32::from_rgb(244, 67, 54)),
+                    );
+                }
             });
-            ui.add_space(10.0);
         });
-    }
+        ui.add_space(10.0);
+    });
+}
+
     
     fn get_current_frame_texture(&self, _with_overlay: bool) -> Option<egui::TextureId> {
         self.current_frame_texture.as_ref().map(|t| t.id())
@@ -979,19 +1060,19 @@ impl ArmTrackerApp {
             });
     }
     
-    fn render_about_window(&mut self, ctx: &egui::Context) {
+   fn render_about_window(&mut self, ctx: &egui::Context) {
         egui::Window::new("About")
             .open(&mut self.show_about)
             .resizable(false)
-            .default_size([400.0, 300.0])
+            .default_size([420.0, 320.0])
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
-                    ui.heading("Arm Rotation Tracking System");
+                    ui.heading("Supro Arm Tracker");
                     ui.label("Version 1.0.0");
-                    ui.add_space(20.0);
+                    ui.add_space(12.0);
                     ui.label("A sophisticated motion tracking application");
                     ui.label("for analyzing arm rotation patterns.");
-                    ui.add_space(20.0);
+                    ui.add_space(16.0);
                     ui.hyperlink("https://github.com/Juliorodrigo23/Supro");
                 });
             });

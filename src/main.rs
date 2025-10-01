@@ -54,7 +54,7 @@ fn main() {
         eprintln!("Running from: {}", p.display());
     }
 
-    // DEBUG: List all available cameras
+    // DEBUG: List available cameras
     println!("=== Camera Detection Debug ===");
     match nokhwa::query(nokhwa::utils::ApiBackend::Auto) {
         Ok(cameras) => {
@@ -69,8 +69,6 @@ fn main() {
     }
     println!("============================\n");
 
-
-
     // Set up GUI options
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -80,20 +78,19 @@ fn main() {
         ..Default::default()
     };
 
-    // Run the application
+    // Run the application (updated title)
     let result = eframe::run_native(
-        "Arm Rotation Tracking System",
+        "Supro Arm Tracker",
         options,
         Box::new(|cc| {
             // Configure fonts and visuals
             configure_fonts(&cc.egui_ctx);
             cc.egui_ctx.set_visuals(create_visuals());
-            
+
             Box::new(app::ArmTrackerApp::new(cc))
         }),
     );
 
-    // Handle the error if needed
     if let Err(e) = result {
         eprintln!("Error running application: {:?}", e);
     }
