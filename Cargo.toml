@@ -17,8 +17,6 @@ osx_minimum_system_version = "10.13"
 [package.metadata.bundle.osx]
 info_plist_path = "/Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/Info.plist"
 
-
-
 [dependencies]
 # GUI Framework
 eframe = "0.24"
@@ -28,13 +26,15 @@ image = { version = "0.24", features = ["jpeg", "png"] }
 cocoa = "0.25"
 objc = "0.2"
 
+# File Dialog
+rfd = "0.12"
+
 # Camera support
 nokhwa = { version = "0.10", features = ["input-native", "output-threaded"] }
 
-# SVG support for logo - use only resvg's dependencies
+# SVG support for logo
 resvg = "0.35"
 usvg = "0.35"
-# Remove direct tiny-skia, use resvg's re-export instead
 
 # Math and Linear Algebra
 nalgebra = "0.32"
@@ -53,6 +53,9 @@ chrono = "0.4"
 
 # File System
 directories = "5.0"
+
+# UUID for temp file naming
+uuid = { version = "1.6", features = ["v4", "fast-rng"] }
 
 # Error Handling
 anyhow = "1.0"

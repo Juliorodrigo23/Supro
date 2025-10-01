@@ -1,15 +1,147 @@
-// src/video.rs - Fixed version
+// src/video.rs - Enhanced with video file processing and overlay capabilities
 use std::path::{Path, PathBuf};
-use anyhow::Result;
+use anyhow::{Result, Context};
 use image::{DynamicImage, ImageBuffer};
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
 use nokhwa::Camera;
 use std::sync::{Arc, Mutex};
+use std::process::{Command};
+use std::fs;
+use std::io::Write;
 
 pub enum VideoSource {
     Camera(Arc<Mutex<Camera>>),
-    File(PathBuf, VideoInfo),
+    File(VideoFileReader),
+}
+
+pub struct VideoFileReader {
+    path: PathBuf,
+    current_frame: usize,
+    total_frames: usize,
+    width: u32,
+    height: u32,
+    fps: f32,
+    frames_cache: Vec<DynamicImage>,
+    is_loaded: bool,
+}
+
+impl VideoFileReader {
+    pub fn new(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        
+        // Get video info using ffprobe
+        let output = Command::new("ffprobe")
+            .args(&[
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-count_frames",
+                "-show_entries", "stream=width,height,r_frame_rate,nb_frames",
+                "-of", "csv=p=0",
+                path.to_str().unwrap(),
+            ])
+            .output()
+            .context("Failed to run ffprobe. Is FFmpeg installed?")?;
+        
+        let info = String::from_utf8_lossy(&output.stdout);
+        let parts: Vec<&str> = info.trim().split(',').collect();
+        
+        if parts.len() < 4 {
+            return Err(anyhow::anyhow!("Failed to parse video info"));
+        }
+        
+        let width = parts[0].parse().unwrap_or(1280);
+        let height = parts[1].parse().unwrap_or(720);
+        let fps_str = parts[2];
+        let fps = if fps_str.contains('/') {
+            let fps_parts: Vec<&str> = fps_str.split('/').collect();
+            fps_parts[0].parse::<f32>().unwrap_or(30.0) / fps_parts[1].parse::<f32>().unwrap_or(1.0)
+        } else {
+            fps_str.parse().unwrap_or(30.0)
+        };
+        let total_frames = parts[3].parse().unwrap_or(0);
+        
+        Ok(Self {
+            path,
+            current_frame: 0,
+            total_frames,
+            width,
+            height,
+            fps,
+            frames_cache: Vec::new(),
+            is_loaded: false,
+        })
+    }
+    
+    pub fn load_all_frames(&mut self) -> Result<()> {
+        if self.is_loaded {
+            return Ok(());
+        }
+        
+        eprintln!("Loading video frames from: {}", self.path.display());
+        
+        // Extract frames using ffmpeg
+        let temp_dir = std::env::temp_dir().join(format!("arm_tracker_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir)?;
+        
+        // Extract frames as images
+        let status = Command::new("ffmpeg")
+            .args(&[
+                "-i", self.path.to_str().unwrap(),
+                "-vf", "scale=640:480",
+                &format!("{}/frame_%04d.png", temp_dir.display()),
+            ])
+            .status()
+            .context("Failed to extract frames with ffmpeg")?;
+        
+        if !status.success() {
+            return Err(anyhow::anyhow!("FFmpeg frame extraction failed"));
+        }
+        
+        // Load extracted frames
+        self.frames_cache.clear();
+        for i in 1..=self.total_frames {
+            let frame_path = temp_dir.join(format!("frame_{:04}.png", i));
+            if frame_path.exists() {
+                let img = image::open(&frame_path)?;
+                self.frames_cache.push(img);
+            }
+        }
+        
+        // Clean up temp files
+        let _ = fs::remove_dir_all(&temp_dir);
+        
+        self.is_loaded = true;
+        eprintln!("Loaded {} frames", self.frames_cache.len());
+        Ok(())
+    }
+    
+    pub fn get_frame(&mut self, index: usize) -> Option<DynamicImage> {
+        if !self.is_loaded {
+            let _ = self.load_all_frames();
+        }
+        self.frames_cache.get(index).cloned()
+    }
+    
+    pub fn next_frame(&mut self) -> Option<DynamicImage> {
+        let frame = self.get_frame(self.current_frame);
+        if frame.is_some() {
+            self.current_frame = (self.current_frame + 1) % self.total_frames;
+        }
+        frame
+    }
+    
+    pub fn seek(&mut self, frame_index: usize) {
+        self.current_frame = frame_index.min(self.total_frames - 1);
+    }
+    
+    pub fn get_progress(&self) -> f32 {
+        if self.total_frames == 0 {
+            0.0
+        } else {
+            self.current_frame as f32 / self.total_frames as f32
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -28,16 +160,14 @@ impl VideoSource {
         
         let camera_index = CameraIndex::Index(index as u32);
         
-        // Create a CameraFormat with the desired settings
         use nokhwa::utils::{CameraFormat, FrameFormat, Resolution};
         
         let format = CameraFormat::new(
             Resolution::new(640, 480),
-            FrameFormat::MJPEG,  // or FrameFormat::YUYV
-            30,  // frame rate
+            FrameFormat::MJPEG,
+            30,
         );
         
-        // Use the Exact variant with the CameraFormat
         let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Exact(format));
         
         eprintln!("DEBUG: Creating camera object...");
@@ -52,16 +182,8 @@ impl VideoSource {
     }
     
     pub fn new_file(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref().to_path_buf();
-        let info = VideoInfo {
-            path: path.clone(),
-            fps: 30.0,
-            frame_count: 1000,
-            width: 1280,
-            height: 720,
-            current_frame: 0,
-        };
-        Ok(VideoSource::File(path, info))
+        let reader = VideoFileReader::new(path)?;
+        Ok(VideoSource::File(reader))
     }
     
     pub fn read_frame(&mut self) -> Result<DynamicImage> {
@@ -69,26 +191,21 @@ impl VideoSource {
             VideoSource::Camera(camera) => {
                 let mut cam = camera.lock().unwrap();
                 
-                // Open stream if not already open
                 if !cam.is_stream_open() {
                     cam.open_stream()
                         .map_err(|e| anyhow::anyhow!("Failed to open camera stream: {}", e))?;
                 }
                 
-                // Capture frame
                 let frame = cam.frame()
                     .map_err(|e| anyhow::anyhow!("Failed to capture frame: {}", e))?;
                 
-                // Get frame data
                 let decoded = frame.decode_image::<RgbFormat>()
                     .map_err(|e| anyhow::anyhow!("Failed to decode frame: {}", e))?;
                 
-                // Convert to DynamicImage
                 let width = decoded.width();
                 let height = decoded.height();
-                let rgb_data = decoded.into_vec();  // Changed from into_flat_vec()
+                let rgb_data = decoded.into_vec();
                 
-                // Convert RGB to RGBA
                 let mut rgba_data = Vec::with_capacity((width * height * 4) as usize);
                 for chunk in rgb_data.chunks(3) {
                     rgba_data.push(chunk[0]);
@@ -101,12 +218,11 @@ impl VideoSource {
                     .ok_or_else(|| anyhow::anyhow!("Failed to create image buffer"))?;
                 
                 let flipped = image::imageops::flip_horizontal(&img);
-            
                 Ok(DynamicImage::ImageRgba8(flipped))
             }
-            VideoSource::File(_, _) => {
-                // For file playback, return a placeholder for now
-                Ok(DynamicImage::new_rgba8(1280, 720))
+            VideoSource::File(reader) => {
+                reader.next_frame()
+                    .ok_or_else(|| anyhow::anyhow!("No more frames in video"))
             }
         }
     }
@@ -119,21 +235,35 @@ impl VideoSource {
                 Some(VideoInfo {
                     path: PathBuf::from("camera://0"),
                     fps: cam.frame_rate() as f64,
-                    frame_count: -1, // Infinite for camera
+                    frame_count: -1,
                     width: resolution.width() as i32,
                     height: resolution.height() as i32,
                     current_frame: 0,
                 })
             }
-            VideoSource::File(_, info) => Some(info.clone()),
+            VideoSource::File(reader) => Some(VideoInfo {
+                path: reader.path.clone(),
+                fps: reader.fps as f64,
+                frame_count: reader.total_frames as i32,
+                width: reader.width as i32,
+                height: reader.height as i32,
+                current_frame: reader.current_frame as i32,
+            }),
         }
     }
     
     pub fn seek(&mut self, frame_number: i32) -> Result<()> {
-        if let VideoSource::File(_, ref mut info) = self {
-            info.current_frame = frame_number;
+        if let VideoSource::File(reader) = self {
+            reader.seek(frame_number as usize);
         }
         Ok(())
+    }
+    
+    pub fn get_progress(&self) -> f32 {
+        match self {
+            VideoSource::Camera(_) => 0.0,
+            VideoSource::File(reader) => reader.get_progress(),
+        }
     }
 }
 
@@ -148,56 +278,198 @@ impl Drop for VideoSource {
 }
 
 pub struct VideoRecorder {
-    output_path: PathBuf,
+    output_dir: PathBuf,
+    session_id: String,
     fps: f64,
     frame_count: i32,
     frames: Vec<DynamicImage>,
+    overlay_frames: Vec<DynamicImage>,
+    width: u32,
+    height: u32,
 }
 
 impl VideoRecorder {
     pub fn new(
-        output_path: impl AsRef<Path>,
-        _width: i32,
-        _height: i32,
+        output_dir: impl AsRef<Path>,
+        width: u32,
+        height: u32,
         fps: f64,
     ) -> Result<Self> {
-        let path = output_path.as_ref().to_path_buf();
+        let session_id = format!("recording_{}", chrono::Local::now().format("%Y%m%d_%H%M%S"));
+        let output_dir = output_dir.as_ref().join(&session_id);
         
-        // Ensure output directory exists
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        // Create output directory
+        std::fs::create_dir_all(&output_dir)?;
         
         Ok(Self {
-            output_path: path,
+            output_dir,
+            session_id,
             fps,
             frame_count: 0,
             frames: Vec::new(),
+            overlay_frames: Vec::new(),
+            width,
+            height,
         })
     }
     
-    pub fn write_frame(&mut self, frame: &DynamicImage) -> Result<()> {
+    pub fn add_frame(&mut self, frame: &DynamicImage, overlay_frame: Option<&DynamicImage>) {
         self.frames.push(frame.clone());
+        if let Some(overlay) = overlay_frame {
+            self.overlay_frames.push(overlay.clone());
+        } else {
+            self.overlay_frames.push(frame.clone());
+        }
         self.frame_count += 1;
+    }
+    
+    pub fn save_videos(&self) -> Result<(PathBuf, PathBuf)> {
+        let raw_video_path = self.output_dir.join("raw_video.mp4");
+        let overlay_video_path = self.output_dir.join("overlay_video.mp4");
+        
+        // Save raw video
+        self.save_video_from_frames(&self.frames, &raw_video_path)?;
+        
+        // Save overlay video
+        self.save_video_from_frames(&self.overlay_frames, &overlay_video_path)?;
+        
+        Ok((raw_video_path, overlay_video_path))
+    }
+    
+    fn save_video_from_frames(&self, frames: &[DynamicImage], output_path: &Path) -> Result<()> {
+        // Create temp directory for frames
+        let temp_dir = self.output_dir.join("temp_frames");
+        std::fs::create_dir_all(&temp_dir)?;
+        
+        // Save frames as images
+        for (i, frame) in frames.iter().enumerate() {
+            let frame_path = temp_dir.join(format!("frame_{:05}.png", i));
+            frame.save(&frame_path)?;
+        }
+        
+        // Use ffmpeg to create video
+        let status = Command::new("ffmpeg")
+            .args(&[
+                "-y",
+                "-r", &self.fps.to_string(),
+                "-i", &format!("{}/frame_%05d.png", temp_dir.display()),
+                "-c:v", "libx264",
+                "-preset", "medium",
+                "-crf", "23",
+                "-pix_fmt", "yuv420p",
+                output_path.to_str().unwrap(),
+            ])
+            .status()
+            .context("Failed to run ffmpeg")?;
+        
+        // Clean up temp frames
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        
+        if !status.success() {
+            return Err(anyhow::anyhow!("FFmpeg video encoding failed"));
+        }
+        
         Ok(())
     }
     
-    pub fn finalize(self) -> Result<PathBuf> {
-        // For demo, save frames as individual images
-        if let Some(parent) = self.output_path.parent() {
-            for (i, frame) in self.frames.iter().enumerate() {
-                let path = parent.join(format!("frame_{:04}.png", i));
-                frame.save(&path)?;
+    pub fn get_output_dir(&self) -> &Path {
+        &self.output_dir
+    }
+}
+
+// Video gallery management
+pub struct VideoGallery {
+    videos_dir: PathBuf,
+    videos: Vec<VideoEntry>,
+}
+
+#[derive(Clone)]
+pub struct VideoEntry {
+    pub path: PathBuf,
+    pub thumbnail: Option<DynamicImage>,
+    pub name: String,
+    pub date: chrono::DateTime<chrono::Local>,
+    pub has_overlay: bool,
+    pub has_csv: bool,
+}
+
+impl VideoGallery {
+    pub fn new(videos_dir: impl AsRef<Path>) -> Self {
+        Self {
+            videos_dir: videos_dir.as_ref().to_path_buf(),
+            videos: Vec::new(),
+        }
+    }
+    
+    pub fn scan_videos(&mut self) -> Result<()> {
+        self.videos.clear();
+        
+        if !self.videos_dir.exists() {
+            std::fs::create_dir_all(&self.videos_dir)?;
+        }
+        
+        // Scan for video directories
+        for entry in std::fs::read_dir(&self.videos_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            
+            if path.is_dir() {
+                // Check for raw video
+                let raw_video = path.join("raw_video.mp4");
+                if raw_video.exists() {
+                    let overlay_exists = path.join("overlay_video.mp4").exists();
+                    let csv_exists = path.join("tracking_data.csv").exists();
+                    
+                    // Generate thumbnail from first frame
+                    let thumbnail = self.extract_thumbnail(&raw_video).ok();
+                    
+                    let metadata = std::fs::metadata(&raw_video)?;
+                    let modified = metadata.modified()?;
+                    let datetime = chrono::DateTime::<chrono::Local>::from(modified);
+                    
+                    self.videos.push(VideoEntry {
+                        path: raw_video,
+                        thumbnail,
+                        name: path.file_name().unwrap().to_string_lossy().to_string(),
+                        date: datetime,
+                        has_overlay: overlay_exists,
+                        has_csv: csv_exists,
+                    });
+                }
             }
         }
-        Ok(self.output_path)
+        
+        // Sort by date (newest first)
+        self.videos.sort_by(|a, b| b.date.cmp(&a.date));
+        
+        Ok(())
     }
     
-    pub fn get_frame_count(&self) -> i32 {
-        self.frame_count
+    fn extract_thumbnail(&self, video_path: &Path) -> Result<DynamicImage> {
+        // Extract first frame as thumbnail
+        let temp_thumb = std::env::temp_dir().join("thumb.png");
+        
+        let status = Command::new("ffmpeg")
+            .args(&[
+                "-i", video_path.to_str().unwrap(),
+                "-vf", "scale=320:240",
+                "-vframes", "1",
+                "-y",
+                temp_thumb.to_str().unwrap(),
+            ])
+            .status()?;
+        
+        if !status.success() {
+            return Err(anyhow::anyhow!("Failed to extract thumbnail"));
+        }
+        
+        let thumb = image::open(&temp_thumb)?;
+        let _ = std::fs::remove_file(&temp_thumb);
+        
+        Ok(thumb)
     }
     
-    pub fn get_duration(&self) -> f64 {
-        self.frame_count as f64 / self.fps
+    pub fn get_videos(&self) -> &[VideoEntry] {
+        &self.videos
     }
 }
