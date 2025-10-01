@@ -114,22 +114,17 @@ impl Default for AppSettings {
 
 impl ArmTrackerApp {
 
-     fn render_video_panel_with_overlay(&mut self, ui: &mut egui::Ui, with_overlay: bool) {
-    // Use a fixed aspect ratio and reserve space in the normal layout flow
-    // so that later widgets won't overlap this area.
+fn render_video_panel_with_overlay(&mut self, ui: &mut egui::Ui, with_overlay: bool) {
     let max_w = ui.available_width();
     let aspect = 16.0 / 9.0;
     let display_w = (max_w - 20.0).max(240.0);
     let display_h = (display_w / aspect).clamp(160.0, 420.0);
 
-    // Reserve space & get a response/rect to paint into (advances layout!)
     let (rect, _resp) = ui.allocate_exact_size(egui::vec2(display_w, display_h), egui::Sense::hover());
 
-    // Background (helps when no frame is available)
     ui.painter().rect_filled(rect, egui::Rounding::same(8.0), egui::Color32::from_rgb(28, 28, 34));
 
-    if let Some(texture_id) = self.get_current_frame_texture(with_overlay) {
-        // Draw the frame
+    if let Some(texture_id) = self.get_current_frame_texture() {  // Remove parameter
         ui.painter().image(
             texture_id,
             rect,
@@ -137,13 +132,11 @@ impl ArmTrackerApp {
             egui::Color32::WHITE,
         );
 
-        // Optional overlay (skeleton / landmarks)
+        // Draw overlay if requested and tracking is active
         if with_overlay && !self.current_result.tracking_lost {
-            // ---- your existing overlay drawing code here, using `rect` ----
-            // e.g., lines, circles scaled by rect.width()/rect.height()
+            self.draw_tracking_overlay(ui, rect);
         }
     } else {
-        // Placeholder
         ui.painter().rect_stroke(rect, egui::Rounding::same(8.0), egui::Stroke::new(1.0, egui::Color32::from_gray(100)));
         ui.painter().text(
             rect.center(),
@@ -530,7 +523,7 @@ impl ArmTrackerApp {
                     egui::Color32::from_rgb(28, 28, 34)
                 );
                 
-                if let Some(texture_id) = self.get_current_frame_texture(false) {
+                if let Some(texture_id) = self.get_current_frame_texture() {
                     ui.painter().image(
                         texture_id,
                         rect,
@@ -570,7 +563,7 @@ impl ArmTrackerApp {
                     egui::Color32::from_rgb(28, 28, 34)
                 );
                 
-                if let Some(texture_id) = self.get_current_frame_texture(true) {
+                if let Some(texture_id) = self.get_current_frame_texture() {
                     ui.painter().image(
                         texture_id,
                         rect,
@@ -1025,7 +1018,7 @@ fn draw_tracking_overlay(&self, ui: &mut egui::Ui, rect: egui::Rect) {
 }
 
     
-    fn get_current_frame_texture(&self, _with_overlay: bool) -> Option<egui::TextureId> {
+    fn get_current_frame_texture(&self) -> Option<egui::TextureId> {
         self.current_frame_texture.as_ref().map(|t| t.id())
     }
     

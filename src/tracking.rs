@@ -639,6 +639,7 @@ fn process_hand_landmarks(&mut self, hand_landmarks: &[[f64; 3]], hand_index: us
     }
 
 
+// In tracking.rs, update the process_frame method around line 500:
 pub fn process_frame(&mut self, frame: &DynamicImage) -> Result<TrackingResult> {
     let mut result = TrackingResult::default();
     result.timestamp = self.sim_time;
@@ -651,27 +652,29 @@ pub fn process_frame(&mut self, frame: &DynamicImage) -> Result<TrackingResult> 
                 if mp_result.pose_landmarks.len() > 16 {
                     self.process_pose_with_kalman(&mp_result.pose_landmarks, &mut result);
                     
-                    // ALWAYS process hands when detected - remove confidence gate
                     for (i, hand_lms) in mp_result.hand_landmarks.iter().enumerate() {
                         self.process_hand_landmarks(hand_lms, i, &mut result);
                     }
                     
-                    // Hand cache logic (only for 1 frame)
-                    for side in ["left", "right"] {
-                        if !result.hands.contains_key(side) {
-                            if let Some((cached_hand, frames_old)) = self.hand_state_cache.get_mut(side) {
-                                if *frames_old < 1 {
-                                    if result.joints.contains_key(&format!("{}_wrist", side)) {
-                                        result.hands.insert(side.to_string(), cached_hand.clone());
-                                        *frames_old += 1;
-                                    } else {
-                                        self.hand_state_cache.remove(side);
-                                    }
-                                } else {
-                                    self.hand_state_cache.remove(side);
-                                }
+                    // Keep gestures from last_valid_gestures if not detected this frame
+                    if result.left_gesture.is_none() {
+                        if let Some(last_gesture) = self.last_valid_gestures.get("left") {
+                            if last_gesture.gesture_type != GestureType::None {
+                                result.left_gesture = Some(last_gesture.clone());
                             }
                         }
+                    } else if let Some(gesture) = &result.left_gesture {
+                        self.last_valid_gestures.insert("left".to_string(), gesture.clone());
+                    }
+                    
+                    if result.right_gesture.is_none() {
+                        if let Some(last_gesture) = self.last_valid_gestures.get("right") {
+                            if last_gesture.gesture_type != GestureType::None {
+                                result.right_gesture = Some(last_gesture.clone());
+                            }
+                        }
+                    } else if let Some(gesture) = &result.right_gesture {
+                        self.last_valid_gestures.insert("right".to_string(), gesture.clone());
                     }
                     
                     result.tracking_lost = false;
