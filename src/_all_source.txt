@@ -1,1218 +1,765 @@
-# Combined dump of /Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/src
-# Excluding: /Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/src/bin
+================================================
+FILE: README.md
+================================================
+# Supro Arm Tracker
+
+An Arm Rotation Tracking System by Julio Contreras — Under Dr. Ortiz's Research Lab 
+
+![Supro Logo](SuproLogo.gif)
+
+Supro Arm Tracker is a sophisticated motion tracking application built in Rust for analyzing forearm rotation patterns (supination and pronation) in real-time from a webcam or pre-recorded video files. It uses Google's MediaPipe for robust skeleton and hand tracking, combined with custom algorithms and Kalman filters for smooth and accurate gesture analysis.
+
+---
+
+## Core Features
+
+* **Multi-Mode Operation**:
+    * 🎥 **Live Camera Mode**: Analyze arm movements directly from a webcam feed[cite: 3, 39].
+    * 📁 **Video File Mode**: Process and analyze pre-recorded video files[cite: 3, 41, 65].
+    * 📊 **Analysis Mode**: Review, chart, and export data from previous sessions[cite: 57, 102].
+* **Advanced Tracking & Visualization**:
+    * Real-time skeleton tracking overlay showing shoulders, elbows, and wrists[cite: 145, 150].
+    * Detailed hand and finger landmark tracking[cite: 154, 158].
+    * **Dual View** UI to compare raw video feed against the tracking overlay side-by-side[cite: 59, 82].
+* **Gesture Recognition**:
+    * Detects and classifies forearm movements into **Supination** or **Pronation**[cite: 319, 412].
+    * Displays real-time gesture classification, confidence levels, and rotation angles[cite: 111, 117, 131, 132].
+* **Data Recording & Export**:
+    * Record tracking sessions for later analysis[cite: 45, 171, 175].
+    * Export detailed, frame-by-frame joint and gesture data to a **CSV file**[cite: 105, 228].
+    * Generate a summary **HTML report** with session statistics[cite: 106, 246].
+* **Configurable Settings**:
+    * Adjust tracking parameters like confidence threshold and smoothing factor[cite: 186, 187].
+    * Toggle tracking for the left arm, right arm, and fingers independently[cite: 180].
+
+---
+
+## Technology Stack
+
+* **Primary Language**: **Rust**
+* **GUI Framework**: **`eframe` / `egui`** for the immediate-mode graphical user interface[cite: 528].
+* **Computer Vision Backend**: **Google MediaPipe** (Pose and Hand models) running in a separate Python process[cite: 551, 552, 564].
+* **Camera & Video Input**: The `nokhwa` crate for camera capture in Rust[cite: 502].
+* **Mathematical Filtering**: A custom **Kalman Filter** implementation for smoothing joint positions, written using the `nalgebra` crate[cite: 318, 325, 441].
+* **Inter-Process Communication**: A lightweight bridge between Rust and Python using standard input/output (stdin/stdout) to exchange JSON data[cite: 286, 293, 307, 309].
+
+---
+
+## How It Works
+
+The application's architecture is designed to leverage the strengths of both Rust and Python:
+
+1.  **UI & Main Logic (Rust)**: The core application is a native `eframe` GUI that manages the user interface, state, and controls[cite: 197].
+2.  **Python Subprocess**: On starting the camera, the Rust application spawns a Python script (`python/mediapipe_service.py`) as a background process[cite: 293].
+3.  **Data Exchange**:
+    * Rust captures a frame from the camera[cite: 511].
+    * The frame is converted to RGB data, serialized into a JSON object, and sent to the Python script's `stdin`[cite: 305, 307].
+    * The Python script reads the JSON, processes the frame using the MediaPipe library, and extracts pose and hand landmarks[cite: 554, 561].
+    * The resulting landmark data is serialized back into a JSON string and printed to `stdout`[cite: 561].
+4.  **Analysis & Rendering (Rust)**:
+    * The Rust application reads the JSON response from the Python process's `stdout`[cite: 309].
+    * The raw landmark data is smoothed using Kalman filters[cite: 442].
+    * Custom algorithms in `tracking.rs` use the smoothed joint and hand positions to calculate forearm rotation angles and classify gestures[cite: 391].
+    * The final tracking data and gestures are rendered as overlays on the video feed in the `egui` UI[cite: 144].
+
+---
+
+## Building and Running
+
+This project is configured for macOS, including a build script for creating a `.app` bundle.
+
+### Prerequisites
+
+1.  **Rust Toolchain**: Install via `rustup`.
+2.  **Python 3**: Ensure `python3` is available in your PATH.
+3.  **Python Dependencies**: Install the required computer vision libraries.
+    ```bash
+    pip3 install mediapipe opencv-python numpy
+    ```
+4.  **macOS Build Tools**: `Xcode Command Line Tools` are needed for the bundling script.
+
+### Instructions
+
+1.  **Clone the repository:**
+    ```bash
+    git clone <your-repo-url>
+    cd Supro-Rewritten
+    ```
+
+2.  **Run in Debug Mode:**
+    ```bash
+    cargo run
+    ```
+
+3.  **Build a Release `.app` Bundle (macOS):**
+    The `build.sh` script automates the process of bundling the application, copying the Python scripts, setting the correct `Info.plist` values, and moving the final app to the `/Applications` folder[cite: 530, 540, 549, 550].
+    ```bash
+    ./build.sh
+    ```
+
+---
+
+## Project Structure
+
+````
+
+.
+├── Cargo.toml              \# Rust project manifest and dependencies
+├── build.sh                \# macOS application bundling script
+├── assets/                 \# Icons and other static assets
+├── python/
+│   └── mediapipe\_service.py  \# The Python backend for MediaPipe processing
+└── src/
+├── main.rs               \# Application entry point and setup
+├── app.rs                \# Core application struct, UI layout, and event handling
+├── tracking.rs           \# All tracking logic, gesture algorithms, and Kalman filters
+├── mediapipe\_bridge.rs   \# Manages communication with the Python subprocess
+├── data.rs               \# Handles CSV and HTML data exporting
+├── video.rs              \# Manages camera and video file sources via `nokhwa`
+└── ui.rs                 \# Theming and custom UI components
+
+```
+
+---
+
+## License
+
+```
 
 
-================================================================================
-FILE: _all_source.txt
-================================================================================
+================================================
+FILE: build.rs
+================================================
+use std::env;
+use std::fs;
+use std::path::Path;
 
-
-
-================================================================================
-FILE: app.rs
-================================================================================
-
-// src/app.rs - Corrected version
-use crate::tracking::{ArmTracker, TrackingResult, GestureType};
-use crate::ui::{Theme, UIComponents};
-use crate::video::{VideoSource, VideoRecorder};
-use crate::data::DataExporter;
-
-use eframe::egui;
-use std::sync::{Arc, Mutex};
-use std::path::PathBuf;
-use chrono::{DateTime, Local};
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum AppMode {
-    Live,
-    VideoFile,
-    Playback,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ViewMode {
-    SingleCamera,
-    DualView,
-    DataAnalysis,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum MediaPipeStatus {
-    NotInitialized,
-    Initializing,
-    Ready,
-    Failed,
-    SimulationMode,
-}
-
-pub struct ArmTrackerApp {
-    // Core components
-    tracker: Arc<Mutex<ArmTracker>>,
-    video_source: Option<VideoSource>,
-    recorder: Option<VideoRecorder>,
-    mediapipe_status: MediaPipeStatus,
+fn main() {
+    let target_dir = env::var("OUT_DIR").unwrap();
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     
-    // UI State
-    mode: AppMode,
-    view_mode: ViewMode,
-    theme: Theme,
-    show_settings: bool,
-    show_about: bool,
+    // Copy Info.plist to target directory
+    let info_plist_src = Path::new(&manifest_dir).join("Info.plist");
+    let info_plist_dst = Path::new(&target_dir).join("../../Info.plist");
     
-    // Recording state
-    is_recording: bool,
-    recording_start: Option<DateTime<Local>>,
-    recording_duration: std::time::Duration,
-    
-    // Tracking data
-    current_result: TrackingResult,
-    tracking_history: Vec<TrackingResult>,
-    last_valid_result: Option<TrackingResult>,  // ADD THIS - Store last valid tracking
-    show_overlay: bool,
-
-
-    // Video processing
-    selected_video: Option<PathBuf>,
-    video_progress: f32,
-    is_playing: bool,
-    
-    // UI Components
-    ui_components: UIComponents,
-    
-    // Settings
-    settings: AppSettings,
-
-    current_frame_texture: Option<egui::TextureHandle>,
-
-    #[cfg(target_os = "macos")]
-    pub(crate) macos_icon_set: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct AppSettings {
-    pub enable_left_arm: bool,
-    pub enable_right_arm: bool,
-    pub enable_fingers: bool,
-    pub confidence_threshold: f32,
-    pub smoothing_factor: f32,
-    pub auto_save: bool,
-    pub output_directory: PathBuf,
-    pub video_quality: VideoQuality,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum VideoQuality {
-    Low,
-    Medium,
-    High,
-    Ultra,
-}
-
-impl Default for AppSettings {
-    fn default() -> Self {
-        Self {
-            enable_left_arm: true,
-            enable_right_arm: true,
-            enable_fingers: true,
-            confidence_threshold: 0.6,
-            smoothing_factor: 0.7,
-            auto_save: true,
-            output_directory: directories::UserDirs::new()
-                .and_then(|dirs| dirs.document_dir().map(|p| p.join("ArmTracker")))
-                .unwrap_or_else(|| PathBuf::from("./output")),
-            video_quality: VideoQuality::High,
-        }
+    if info_plist_src.exists() {
+        fs::copy(info_plist_src, info_plist_dst).expect("Failed to copy Info.plist");
     }
 }
 
-impl ArmTrackerApp {
 
-fn render_video_panel_with_overlay(&mut self, ui: &mut egui::Ui, with_overlay: bool) {
-    let max_w = ui.available_width();
-    let aspect = 16.0 / 9.0;
-    let display_w = (max_w - 20.0).max(240.0);
-    let display_h = (display_w / aspect).clamp(160.0, 420.0);
+================================================
+FILE: build.sh
+================================================
+#!/bin/bash
+set -euo pipefail
 
-    let (rect, _resp) = ui.allocate_exact_size(egui::vec2(display_w, display_h), egui::Sense::hover());
+echo "Building bundle..."
+cargo bundle --release
 
-    ui.painter().rect_filled(rect, egui::Rounding::same(8.0), egui::Color32::from_rgb(28, 28, 34));
+APP="target/release/bundle/osx/Arm Tracker.app"
+PLIST="$APP/Contents/Info.plist"
+RES="$APP/Contents/Resources"
 
-    if let Some(texture_id) = self.get_current_frame_texture() {  // Remove parameter
-        ui.painter().image(
-            texture_id,
-            rect,
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            egui::Color32::WHITE,
-        );
+# Your .icns built from PNG beforehand and tracked by Cargo.toml:
+# [package.metadata.bundle]
+# icon = ["assets/AppIcon.icns"]
+ASSETS_ICNS="assets/AppIcon.icns"
 
-        // Draw overlay if requested and tracking is active
-        if with_overlay && !self.current_result.tracking_lost {
-            self.draw_tracking_overlay(ui, rect);
-        }
-    } else {
-        ui.painter().rect_stroke(rect, egui::Rounding::same(8.0), egui::Stroke::new(1.0, egui::Color32::from_gray(100)));
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "No video feed",
-            egui::FontId::proportional(16.0),
-            egui::Color32::from_gray(180),
-        );
-    }
-}
+echo "Ensuring AppIcon.icns exists inside the bundle..."
+if [[ ! -f "$RES/AppIcon.icns" ]]; then
+  echo "  - AppIcon.icns not found in bundle Resources. Attempting to copy from assets/..."
+  mkdir -p "$RES"
+  if [[ -f "$ASSETS_ICNS" ]]; then
+    cp "$ASSETS_ICNS" "$RES/AppIcon.icns"
+    echo "  - Copied: $ASSETS_ICNS -> $RES/AppIcon.icns"
+  else
+    echo "ERROR: $ASSETS_ICNS not found. Build AppIcon.icns from your 1024x1024 PNG first."
+    echo "Hint:"
+    echo "  mkdir -p assets/AppIcon.iconset"
+    echo "  sips -z 16 16     appicon_1024.png --out assets/AppIcon.iconset/icon_16x16.png"
+    echo "  sips -z 32 32     appicon_1024.png --out assets/AppIcon.iconset/icon_16x16@2x.png"
+    echo "  sips -z 32 32     appicon_1024.png --out assets/AppIcon.iconset/icon_32x32.png"
+    echo "  sips -z 64 64     appicon_1024.png --out assets/AppIcon.iconset/icon_32x32@2x.png"
+    echo "  sips -z 128 128   appicon_1024.png --out assets/AppIcon.iconset/icon_128x128.png"
+    echo "  sips -z 256 256   appicon_1024.png --out assets/AppIcon.iconset/icon_128x128@2x.png"
+    echo "  sips -z 256 256   appicon_1024.png --out assets/AppIcon.iconset/icon_256x256.png"
+    echo "  sips -z 512 512   appicon_1024.png --out assets/AppIcon.iconset/icon_256x256@2x.png"
+    echo "  sips -z 512 512   appicon_1024.png --out assets/AppIcon.iconset/icon_512x512.png"
+    echo "  cp appicon_1024.png assets/AppIcon.iconset/icon_512x512@2x.png"
+    echo "  iconutil -c icns assets/AppIcon.iconset -o assets/AppIcon.icns"
+    exit 1
+  fi
+fi
 
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let tracker = Arc::new(Mutex::new(
-            ArmTracker::new().expect("Failed to initialize tracker")
-        ));
+echo "Setting icon and permissions keys in Info.plist..."
 
-        Self {
-            tracker,
-            video_source: None,
-            recorder: None,
-            mediapipe_status: MediaPipeStatus::NotInitialized,
-            mode: AppMode::Live,
-            view_mode: ViewMode::DualView,
-            theme: Theme::default(),
-            show_settings: false,
-            show_about: false,
-            is_recording: false,
-            recording_start: None,
-            recording_duration: std::time::Duration::ZERO,
-            current_result: TrackingResult::default(),
-            tracking_history: Vec::new(),
-            last_valid_result: None,  // ADD THIS
-            show_overlay: true,
-            selected_video: None,
-            video_progress: 0.0,
-            is_playing: true,
-            ui_components: UIComponents::new(&cc.egui_ctx),
-            settings: AppSettings::default(),
-            current_frame_texture: None,    
-            #[cfg(target_os = "macos")]
-            macos_icon_set: false,
-        }
-    }
+# Ensure CFBundleIconName = AppIcon (no extension)
+# If the key exists, set; otherwise, add.
+if /usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$PLIST" >/dev/null 2>&1; then
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleIconName AppIcon' "$PLIST"
+else
+  /usr/libexec/PlistBuddy -c 'Add :CFBundleIconName string AppIcon' "$PLIST"
+fi
+
+# If legacy CFBundleIconFile exists and has an extension, fix it (macOS prefers name w/o extension)
+if /usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$PLIST" >/dev/null 2>&1; then
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleIconFile AppIcon' "$PLIST" || true
+fi
+
+# (Optional) Set App Store category string to Developer Tools
+if /usr/libexec/PlistBuddy -c 'Print :LSApplicationCategoryType' "$PLIST" >/dev/null 2>&1; then
+  /usr/libexec/PlistBuddy -c 'Set :LSApplicationCategoryType public.app-category.developer-tools' "$PLIST"
+else
+  /usr/libexec/PlistBuddy -c 'Add :LSApplicationCategoryType string public.app-category.developer-tools' "$PLIST"
+fi
+
+# Add/Update privacy usage descriptions
+if /usr/libexec/PlistBuddy -c 'Print :NSCameraUsageDescription' "$PLIST" >/dev/null 2>&1; then
+  /usr/libexec/PlistBuddy -c 'Set :NSCameraUsageDescription This app requires camera access to track arm rotation movements for analysis.' "$PLIST"
+else
+  /usr/libexec/PlistBuddy -c 'Add :NSCameraUsageDescription string This app requires camera access to track arm rotation movements for analysis.' "$PLIST"
+fi
+
+if /usr/libexec/PlistBuddy -c 'Print :NSMicrophoneUsageDescription' "$PLIST" >/dev/null 2>&1; then
+  /usr/libexec/PlistBuddy -c 'Set :NSMicrophoneUsageDescription Arm Tracker may record audio while capturing video.' "$PLIST"
+else
+  /usr/libexec/PlistBuddy -c 'Add :NSMicrophoneUsageDescription string Arm Tracker may record audio while capturing video.' "$PLIST"
+fi
+
+# (Nice to have) Mark high-DPI capable
+if /usr/libexec/PlistBuddy -c 'Print :NSHighResolutionCapable' "$PLIST" >/dev/null 2>&1; then
+  /usr/libexec/PlistBuddy -c 'Set :NSHighResolutionCapable true' "$PLIST"
+else
+  /usr/libexec/PlistBuddy -c 'Add :NSHighResolutionCapable bool true' "$PLIST"
+fi
+
+# (Strongly recommended) bump CFBundleVersion to avoid icon caching issues
+# If CFBundleVersion is numeric, increment; else set a fresh numeric build
+if /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$PLIST" >/dev/null 2>&1; then
+  CUR_VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$PLIST" || echo 0)"
+  if [[ "$CUR_VER" =~ ^[0-9]+$ ]]; then
+    NEW_VER=$((CUR_VER + 1))
+  else
+    NEW_VER="$(date +%s)"
+  fi
+  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $NEW_VER" "$PLIST"
+else
+  /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $(date +%s)" "$PLIST"
+fi
+
+echo ""
+echo "✓ Bundle created successfully"
+echo "Verifying keys..."
+/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST" || echo "CFBundleIdentifier missing (check Cargo.toml identifier)"
+/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$PLIST" || echo "CFBundleIconName missing"
+ls -l "$RES/AppIcon.icns" || true
+echo ""
+
+# After creating the bundle, copy Python files
+PYTHON_DIR="$APP/Contents/Resources/python"
+mkdir -p "$PYTHON_DIR"
+cp -r python/*.py "$PYTHON_DIR/"
+echo "Copied Python scripts to bundle"
+
+# Replace old app in /Applications to avoid duplicate cache entries
+DEST="/Applications/Arm Tracker.app"
+if [[ -d "$DEST" ]]; then
+  echo "Removing old /Applications bundle..."
+  rm -rf "$DEST"
+fi
+echo "Copying new bundle to /Applications..."
+cp -R "$APP" "$DEST"
+
+echo "Refreshing Dock/Finder to clear icon caches..."
+killall Dock || true
+killall Finder || true
+
+echo "Opening app..."
+open "$DEST"
+
+echo "Done."
+
+
+
+================================================
+FILE: Cargo.toml
+================================================
+[package]
+name = "arm_tracker"
+version = "0.1.0"
+edition = "2021"
+
+[package.metadata.bundle]
+name = "Arm Tracker"
+identifier = "com.armtracker.app"
+icon = ["assets/AppIcon.icns"]
+version = "1.0.0"
+copyright = "Copyright (c) 2025"
+category = "DeveloperTool" 
+short_description = "Arm rotation tracking system"
+long_description = "A sophisticated motion tracking application for analyzing arm rotation patterns"
+osx_minimum_system_version = "10.13"
+
+[package.metadata.bundle.osx]
+info_plist_path = "/Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/Info.plist"
+
+[dependencies]
+# GUI Framework
+eframe = "0.24"
+egui = "0.24"
+egui_extras = "0.24"
+image = { version = "0.24", features = ["jpeg", "png"] }
+cocoa = "0.25"
+objc = "0.2"
+
+# File Dialog
+rfd = "0.12"
+
+# Camera support
+nokhwa = { version = "0.10", features = ["input-native", "output-threaded"] }
+
+# SVG support for logo
+resvg = "0.35"
+usvg = "0.35"
+
+# Math and Linear Algebra
+nalgebra = "0.32"
+nalgebra-glm = "0.18"
+
+# Async Runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+csv = "1.3"
+
+# Time and Date
+chrono = "0.4"
+
+# File System
+directories = "5.0"
+
+# UUID for temp file naming
+uuid = { version = "1.6", features = ["v4", "fast-rng"] }
+
+# Error Handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Basic utilities
+once_cell = "1.19"
+
+[[bin]]
+name = "arm_tracker"
+path = "src/main.rs"
+
+
+================================================
+FILE: combine.py
+================================================
+#!/usr/bin/env python3
+"""
+Combine all file contents under a source tree into a single text file,
+excluding a specific subdirectory.
+
+Usage:
+    python3 combine_src_to_text.py
+    # or customize paths by editing DEFAULT_* constants or passing CLI args:
+    python3 combine_src_to_text.py "/path/to/src" "/path/to/src/bin" "/path/to/output.txt"
+"""
+
+from __future__ import annotations
+import sys
+import os
+from pathlib import Path
+from typing import Iterable
+
+# --- Default locations (edit these if you want to run without CLI args) ---
+DEFAULT_SRC_DIR = Path("/Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/src")
+DEFAULT_EXCLUDE_DIR = DEFAULT_SRC_DIR / "bin"
+DEFAULT_OUTPUT_FILE = DEFAULT_SRC_DIR / "_all_source.txt"
+DEFAULT_EXTRA_PATHS = [
+    Path("/Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/Cargo.toml"),
+    Path("/Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/build.sh"),
+    Path("/Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/python/mediapipe_service.py"),
+    Path("/Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/python/mediapipe_processor.py"),
+]
+# -------------------------------------------------------------------------
+
+
+def iter_files(root: Path, exclude_dir: Path) -> Iterable[Path]:
+    """
+    Yield all files under `root`, skipping anything inside `exclude_dir`.
+    """
+    root = root.resolve()
+    exclude_dir = exclude_dir.resolve()
+    for dirpath, dirnames, filenames in os.walk(root):
+        current = Path(dirpath).resolve()
+
+        # If we're at/inside the excluded folder, prune it from traversal.
+        # (Modify dirnames in-place so os.walk won't descend.)
+        # Compare using .resolve() to be robust to symlinks.
+        dirnames[:] = [
+            d for d in dirnames
+            if (Path(dirpath) / d).resolve() != exclude_dir
+            and not d.startswith(".git")   # nice to skip VCS internals if present
+        ]
+
+        # Skip everything if this subtree is the excluded path
+        if current == exclude_dir or exclude_dir in current.parents:
+            continue
+
+        for fn in filenames:
+            p = current / fn
+            # Skip typical junk files
+            if fn == ".DS_Store":
+                continue
+            yield p
+
+
+def read_file_as_text(path: Path) -> str:
+    """
+    Read a file as UTF-8 text, falling back to replacement characters on decode errors.
+    If the file is truly binary, you'll still get a readable best-effort dump.
+    """
+    try:
+        # Try straightforward UTF-8 first
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        # Fallback: decode with replacement to avoid crashing
+        with path.open("rb") as f:
+            data = f.read()
+        return data.decode("utf-8", errors="replace")
+    except Exception as e:
+        return f"<<ERROR READING FILE: {e}>>"
+
+
+def write_combined_output(
+    src_dir: Path,
+    exclude_dir: Path,
+    out_file: Path,
+    extra_paths: Iterable[Path] | None = None,
+) -> None:
+    """
+    Create (or overwrite) `out_file` containing the concatenated contents of all files
+    under `src_dir` except those inside `exclude_dir`. Each file is prefixed by a header
+    showing its relative path. If `extra_paths` are provided, append them at the end
+    with absolute-path headers.
+    """
+    src_dir = src_dir.resolve()
+    exclude_dir = exclude_dir.resolve()
+    out_file = out_file.resolve()
+
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+
+    files = sorted(iter_files(src_dir, exclude_dir))
+    count = 0
+
+    with out_file.open("w", encoding="utf-8") as out:
+        out.write(f"# Combined dump of {src_dir}\n")
+        out.write(f"# Excluding: {exclude_dir}\n\n")
+
+        for p in files:
+            rel = p.relative_to(src_dir)
+            out.write("\n")
+            out.write("=" * 80 + "\n")
+            out.write(f"FILE: {rel}\n")
+            out.write("=" * 80 + "\n\n")
+            out.write(read_file_as_text(p))
+            out.write("\n")
+            count += 1
+
+        # --- append extras at the very end ---
+        if extra_paths:
+            out.write("\n")
+            out.write("#" * 80 + "\n")
+            out.write("# EXTRA FILES (appended after source tree)\n")
+            out.write("#" * 80 + "\n\n")
+
+            for xp in extra_paths:
+                xp = Path(xp).resolve()
+                out.write("\n")
+                out.write("=" * 80 + "\n")
+                out.write(f"EXTRA FILE: {xp}\n")
+                out.write("=" * 80 + "\n\n")
+                out.write(read_file_as_text(xp))
+                out.write("\n")
+
+    print(f"Wrote {count} in-tree files + {len(list(extra_paths or []))} extras into: {out_file}")
+
+
+def main() -> None:
+    """
+    Entry point. You can:
+      - Run with no args to use the DEFAULT_* constants at the top, or
+      - Provide 1–N args:
+            arg1 = src_dir
+            arg2 = exclude_dir (defaults to <src_dir>/bin if omitted)
+            arg3 = output_file (defaults to <src_dir>/_all_source.txt if omitted)
+            arg4..N = extra file paths to append at end
+    """
+    argv = sys.argv[1:]
+
+    if len(argv) == 0:
+        src_dir = DEFAULT_SRC_DIR
+        exclude_dir = DEFAULT_EXCLUDE_DIR
+        out_file = DEFAULT_OUTPUT_FILE
+        extra_paths = DEFAULT_EXTRA_PATHS
+    else:
+        src_dir = Path(argv[0])
+        exclude_dir = Path(argv[1]) if len(argv) >= 2 else (src_dir / "bin")
+        out_file = Path(argv[2]) if len(argv) >= 3 else (src_dir / "_all_source.txt")
+        extra_paths = [Path(p) for p in argv[3:]] if len(argv) >= 4 else DEFAULT_EXTRA_PATHS
+
+    write_combined_output(src_dir, exclude_dir, out_file, extra_paths)
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+================================================
+FILE: Info.plist
+================================================
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>arm_tracker</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.armtracker.app</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Arm Tracker</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>10.13</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSCameraUsageDescription</key>
+    <string>This app requires camera access to track arm rotation movements for analysis.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Arm Tracker may record audio while capturing video.</string>
+</dict>
+</plist>
+
+
+================================================
+FILE: python/mediapipe_processor.py
+================================================
+#mediapipe_processor.py
+import mediapipe as mp
+import numpy as np
+import json
+import cv2
+
+class MediaPipeProcessor:
+    def __init__(self):
+        self.mp_pose = mp.solutions.pose
+        self.mp_hands = mp.solutions.hands
+        self.mp_drawing = mp.solutions.drawing_utils
+        
+        self.pose = self.mp_pose.Pose(
+            static_image_mode=False,
+            model_complexity=2,
+            smooth_landmarks=True,
+            enable_segmentation=False,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
+        
+        self.hands = self.mp_hands.Hands(
+            static_image_mode=False,
+            max_num_hands=2,
+            model_complexity=1,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
     
-    fn update_mediapipe_status(&mut self) {
-        if let Ok(tracker) = self.tracker.lock() {
-            if tracker.is_using_mediapipe() {
-                self.mediapipe_status = MediaPipeStatus::Ready;
-            } else if tracker.is_initializing() {
-                self.mediapipe_status = MediaPipeStatus::Initializing;
-            } else if self.video_source.is_none() {
-                self.mediapipe_status = MediaPipeStatus::NotInitialized;
-            } else {
-                self.mediapipe_status = MediaPipeStatus::SimulationMode;
-            }
+    def process_frame(self, frame_data):
+        """Process a frame and return landmarks"""
+        # Convert frame data to numpy array
+        frame = np.frombuffer(frame_data, dtype=np.uint8)
+        frame = frame.reshape((720, 1280, 3))  # Adjust dimensions as needed
+        
+        # Convert BGR to RGB
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
+        # Process with MediaPipe
+        pose_results = self.pose.process(rgb_frame)
+        hands_results = self.hands.process(rgb_frame)
+        
+        result = {
+            'pose_landmarks': [],
+            'hand_landmarks': []
         }
-    }
+        
+        if pose_results.pose_landmarks:
+            result['pose_landmarks'] = [
+                [lm.x, lm.y, lm.z] 
+                for lm in pose_results.pose_landmarks.landmark
+            ]
+        
+        if hands_results.multi_hand_landmarks:
+            for hand_landmarks in hands_results.multi_hand_landmarks:
+                hand_data = [
+                    [lm.x, lm.y, lm.z] 
+                    for lm in hand_landmarks.landmark
+                ]
+                result['hand_landmarks'].append(hand_data)
+        
+        return json.dumps(result)
     
-    fn render_tracking_status(&self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let (status_text, color) = match self.mediapipe_status {
-                MediaPipeStatus::NotInitialized => ("Not Initialized", egui::Color32::GRAY),
-                MediaPipeStatus::Initializing => ("Initializing...", egui::Color32::YELLOW),
-                MediaPipeStatus::Ready => ("MediaPipe Ready", egui::Color32::GREEN),
-                MediaPipeStatus::Failed => ("Failed (Simulation Mode)", egui::Color32::from_rgb(255, 100, 0)),
-                MediaPipeStatus::SimulationMode => ("Simulation Mode", egui::Color32::from_rgb(100, 150, 255)),
-            };
+    def cleanup(self):
+        self.pose.close()
+        self.hands.close()
+
+
+================================================
+FILE: python/mediapipe_service.py
+================================================
+#!/usr/bin/env python3
+import sys
+import json
+import numpy as np
+import traceback
+
+try:
+    import mediapipe as mp
+    import cv2
+except ImportError as e:
+    print(f"Error: Missing required packages: {e}", file=sys.stderr)
+    print("Install with: pip3 install mediapipe opencv-python numpy", file=sys.stderr)
+    sys.exit(1)
+
+class MediaPipeService:
+    def __init__(self):
+        # Initialize pose tracking
+        self.mp_pose = mp.solutions.pose
+        self.pose = self.mp_pose.Pose(
+            static_image_mode=False,
+            model_complexity=1,  # Changed from 0 to 1 for better accuracy
+            smooth_landmarks=True,
+            enable_segmentation=False,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5  # Increased from 0.3
+        )
+        
+        # Initialize hand tracking - ENABLED
+        self.mp_hands = mp.solutions.hands
+        self.hands = self.mp_hands.Hands(
+            static_image_mode=False,
+            max_num_hands=2,
+            model_complexity=1,  # Changed from 0 to 1
+            min_detection_confidence=0.4,  # Lowered from 0.5
+            min_tracking_confidence=0.4
+        )
+        
+        print("MediaPipe service initialized with hands enabled", file=sys.stderr)
+    
+    def process_frame(self, frame_data):
+        try:
+            width = frame_data['width']
+            height = frame_data['height']
+            data = np.array(frame_data['data'], dtype=np.uint8)
             
-            // Draw status indicator dot
-            let radius = 6.0;
-            let rect = ui.allocate_space(egui::vec2(radius * 2.0, radius * 2.0)).1;
-            ui.painter().circle_filled(rect.center(), radius, color);
+            # Reshape frame
+            frame = data.reshape((height, width, 3))
             
-            ui.add_space(5.0);
-            ui.label(egui::RichText::new(status_text).color(color));
+            # Process with MediaPipe
+            pose_results = self.pose.process(frame)
+            hands_results = self.hands.process(frame)
             
-            // Add spinner animation if initializing
-            if self.mediapipe_status == MediaPipeStatus::Initializing {
-                ui.add(egui::Spinner::new());
+            result = {
+                'pose_landmarks': [],
+                'hand_landmarks': []
             }
-        });
-    }
-
-    fn stop_camera(&mut self) {
-        // Stop video source
-        self.video_source = None;
-        self.current_frame_texture = None;
-
-        self.current_result = TrackingResult::default();
-        self.last_valid_result = None;
-        
-        // Shutdown MediaPipe when camera stops
-        if let Ok(mut tracker) = self.tracker.lock() {
-            tracker.shutdown_mediapipe();
-        }
-        
-        self.mediapipe_status = MediaPipeStatus::NotInitialized;
-        eprintln!("Camera and MediaPipe stopped");
-    }
-
-   fn start_camera(&mut self) {
-    if let Some(src) = self.video_source.as_mut() {
-        if let Err(e) = src.read_frame() {
-            eprintln!("Camera already open but failed to read frame: {e}");
-        } else {
-            eprintln!("Camera already running.");
-        }
-        return;
-    }
-
-    // Try to open camera
-    match VideoSource::new_camera(0) {
-        Ok(mut src) => {
-            match src.read_frame() {
-                Ok(frame) => {
-                    eprintln!("Camera started: {}x{}", frame.width(), frame.height());
-                    self.video_source = Some(src);
-                    self.mediapipe_status = MediaPipeStatus::Initializing;
-                    
-                    // DELAYED MediaPipe initialization - spawn in background
-                    let tracker = Arc::clone(&self.tracker);
-                    std::thread::spawn(move || {
-                        // Wait 500ms for camera to stabilize
-                        std::thread::sleep(std::time::Duration::from_millis(500));
-                        
-                        eprintln!("Starting MediaPipe initialization...");
-                        if let Ok(mut t) = tracker.lock() {
-                            t.initialize_mediapipe();
-                        }
-                    });
-                }
-                Err(e) => {
-                    eprintln!("Camera opened but failed to read first frame: {e}");
-                }
-            }
-        }
-        Err(e) => {
-            eprintln!("Failed to open camera: {e}");
-        }
-    }
-}
-    
-    fn on_mode_changed(&mut self, old_mode: AppMode, new_mode: AppMode) {
-        eprintln!("Mode changed from {:?} to {:?}", old_mode, new_mode);
-        
-        match new_mode {
-            AppMode::Live => {
-                // When switching to Live mode, camera will be started when user clicks "Start Camera"
-                eprintln!("Switched to Live Camera mode");
-            }
-            AppMode::VideoFile => {
-                // Stop camera and MediaPipe if running
-                if self.video_source.is_some() {
-                    self.stop_camera();
-                }
-                eprintln!("Switched to Video File mode");
-            }
-            AppMode::Playback => {
-                // Stop camera and MediaPipe if running
-                if self.video_source.is_some() {
-                    self.stop_camera();
-                }
-                eprintln!("Switched to Playback/Analysis mode");
-            }
-        }
-    }
-    
-    fn toggle_recording(&mut self) {
-        self.is_recording = !self.is_recording;
-        
-        if self.is_recording {
-            self.recording_start = Some(Local::now());
             
-            // Only ensure MediaPipe is initialized if we're recording from camera
-            if self.mode == AppMode::Live && self.video_source.is_some() {
-                if let Ok(mut tracker) = self.tracker.lock() {
-                    // This will be a no-op if already initialized
-                    tracker.initialize_mediapipe();
-                }
-            }
-        } else {
-            self.recording_start = None;
-            self.recording_duration = std::time::Duration::ZERO;
-        }
-    }
-
-   fn render_header(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("header").show(ctx, |ui| {
-            ui.add_space(8.0);
-            egui::menu::bar(ui, |ui| {
-                // Left area: Logo + Titles + Byline
-                ui.horizontal(|ui| {
-                    if let Some(logo) = self.ui_components.logo_texture.as_ref() {
-                        // Bigger logo (was 40x40 → now 64x64)
-                        ui.image((logo.id(), egui::vec2(64.0, 64.0)));
-                    }
-
-                    ui.vertical(|ui| {
-                        // Main title now uses “Supro”
-                        ui.heading("Supro Arm Tracker");
-
-                        // Subtitle / section title row (optional small tagline)
-                        ui.add_space(2.0);
-                        ui.label(
-                            egui::RichText::new("Arm Rotation Tracking System")
-                                .italics()
-                                .size(14.0)
-                                .color(egui::Color32::LIGHT_GRAY),
-                        );
-
-                        // Byline
-                        ui.add_space(2.0);
-                        ui.label(
-                            egui::RichText::new("By Julio Contreras — Under Dr. Ortiz's Research Lab")
-                                .size(13.0)
-                                .color(egui::Color32::WHITE),
-                        );
-                    });
-                });
-
-                ui.separator();
-
-                // Mode selection
-                ui.horizontal(|ui| {
-                    let old_mode = self.mode;
-
-                    ui.selectable_value(&mut self.mode, AppMode::Live, "🎥 Live Camera");
-                    ui.selectable_value(&mut self.mode, AppMode::VideoFile, "📁 Video File");
-                    ui.selectable_value(&mut self.mode, AppMode::Playback, "📊 Analysis");
-
-                    if self.mode != old_mode {
-                        self.on_mode_changed(old_mode, self.mode);
-                    }
-                });
-
-                ui.separator();
-
-                // View mode buttons
-                ui.horizontal(|ui| {
-                    if ui.selectable_label(self.view_mode == ViewMode::SingleCamera, "Single View").clicked() {
-                        self.view_mode = ViewMode::SingleCamera;
-                    }
-
-                    if ui.selectable_label(self.view_mode == ViewMode::DualView, "Dual View").clicked() {
-                        self.view_mode = ViewMode::DualView;
-                    }
-
-                    if ui.selectable_label(self.view_mode == ViewMode::DataAnalysis, "Data Analysis").clicked() {
-                        self.view_mode = ViewMode::DataAnalysis;
-                    }
-                });
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("⚙ Settings").clicked() {
-                        self.show_settings = !self.show_settings;
-                    }
-                    if ui.button("ℹ About").clicked() {
-                        self.show_about = !self.show_about;
-                    }
-                });
-            });
-            ui.add_space(6.0);
-        });
-    }
-    
-    fn render_main_content(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            match self.mode {
-                AppMode::Live => {
-                    match self.view_mode {
-                        ViewMode::SingleCamera => self.render_single_view(ui),
-                        ViewMode::DualView => self.render_dual_view(ui),
-                        ViewMode::DataAnalysis => self.render_analysis_view(ui),
-                    }
-                }
-                AppMode::VideoFile => {
-                    self.render_video_file_mode(ui);
-                }
-                AppMode::Playback => {
-                    self.render_analysis_view(ui);
-                }
-            }
-        });
-    }
-
-    fn render_video_file_mode(&mut self, ui: &mut egui::Ui) {
-        ui.vertical_centered(|ui| {
-            ui.add_space(50.0);
-            ui.heading("Video File Mode");
-            ui.add_space(20.0);
+            if pose_results.pose_landmarks:
+                result['pose_landmarks'] = [
+                    [lm.x, lm.y, lm.z] 
+                    for lm in pose_results.pose_landmarks.landmark
+                ]
             
-            if let Some(path) = &self.selected_video {
-                ui.label(format!("Selected: {}", path.display()));
-                ui.add_space(10.0);
-                
-                // Video playback controls would go here
-                ui.horizontal(|ui| {
-                    if ui.button(if self.is_playing { "⏸ Pause" } else { "▶ Play" }).clicked() {
-                        self.is_playing = !self.is_playing;
-                    }
-                    
-                    ui.add(egui::Slider::new(&mut self.video_progress, 0.0..=100.0)
-                        .text("Progress")
-                        .suffix("%"));
-                });
-                
-                ui.add_space(20.0);
-                
-                // Video display
-                self.render_video_panel(ui, true);
-            } else {
-                ui.label("No video file selected");
-                ui.add_space(20.0);
-                
-                if ui.button("📁 Select Video File").clicked() {
-                    // TODO: Open file picker
-                    eprintln!("File picker not yet implemented");
-                }
-            }
-        });
-    }
-    
-    fn render_single_view(&mut self, ui: &mut egui::Ui) {
-        ui.columns(2, |columns| {
-            // Left column - Video feed
-            columns[0].group(|ui| {
-                ui.horizontal(|ui| {
-                    ui.heading("Camera Feed");
-                    
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Add overlay toggle button
-                        let toggle_text = if self.show_overlay { "Hide Overlay" } else { "Show Overlay" };
-                        if ui.button(toggle_text).clicked() {
-                            self.show_overlay = !self.show_overlay;
-                        }
-                    });
-                });
-                
-                self.render_video_panel(ui, self.show_overlay);  // Use show_overlay state
-            });
+            # PROCESS HANDS - ENABLED
+            if hands_results.multi_hand_landmarks:
+                for hand_landmarks in hands_results.multi_hand_landmarks:
+                    hand_data = [
+                        [lm.x, lm.y, lm.z] 
+                        for lm in hand_landmarks.landmark
+                    ]
+                    result['hand_landmarks'].append(hand_data)
             
-            // Right column - Tracking info
-            columns[1].vertical(|ui| {
-                // Gesture detection panel
-                ui.group(|ui| {
-                    ui.heading("Gesture Detection");
-                    self.render_gesture_panel(ui);
-                });
-                
-                ui.add_space(20.0);
-                
-                // Joint tracking panel
-                ui.group(|ui| {
-                    ui.heading("Joint Tracking");
-                    self.render_joint_panel(ui);
-                });
-            });
-        });
-    }
-    
-    fn render_dual_view(&mut self, ui: &mut egui::Ui) {
-    // Top row: two video panels side-by-side with EQUAL sizes
-    ui.horizontal(|ui| {
-        let avail_w = ui.available_width();
-        let panel_w = (avail_w - 20.0) / 2.0;
-        
-        // Fixed aspect ratio for consistent sizing
-        let aspect = 16.0 / 9.0;
-        let video_display_h = (panel_w / aspect).clamp(180.0, 360.0);
-
-        // Left panel - Raw Feed
-        ui.vertical(|ui| {
-            ui.set_width(panel_w);
-            ui.group(|ui| {
-                ui.heading("Raw Feed");
-                ui.add_space(6.0);
-                
-                // Allocate exact size for video
-                let (rect, _resp) = ui.allocate_exact_size(
-                    egui::vec2(panel_w - 20.0, video_display_h), 
-                    egui::Sense::hover()
-                );
-                
-                ui.painter().rect_filled(
-                    rect, 
-                    egui::Rounding::same(8.0), 
-                    egui::Color32::from_rgb(28, 28, 34)
-                );
-                
-                if let Some(texture_id) = self.get_current_frame_texture() {
-                    ui.painter().image(
-                        texture_id,
-                        rect,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        egui::Color32::WHITE,
-                    );
-                } else {
-                    ui.painter().text(
-                        rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "No video feed",
-                        egui::FontId::proportional(16.0),
-                        egui::Color32::from_gray(180),
-                    );
-                }
-            });
-        });
-
-        ui.add_space(20.0);
-
-        // Right panel - Tracking Overlay
-        ui.vertical(|ui| {
-            ui.set_width(panel_w);
-            ui.group(|ui| {
-                ui.heading("Tracking Overlay");
-                ui.add_space(6.0);
-                
-                // Allocate exact same size for video
-                let (rect, _resp) = ui.allocate_exact_size(
-                    egui::vec2(panel_w - 20.0, video_display_h), 
-                    egui::Sense::hover()
-                );
-                
-                ui.painter().rect_filled(
-                    rect, 
-                    egui::Rounding::same(8.0), 
-                    egui::Color32::from_rgb(28, 28, 34)
-                );
-                
-                if let Some(texture_id) = self.get_current_frame_texture() {
-                    ui.painter().image(
-                        texture_id,
-                        rect,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        egui::Color32::WHITE,
-                    );
-                    
-                    // Draw tracking overlay
-                    if !self.current_result.tracking_lost {
-                        self.draw_tracking_overlay(ui, rect);
-                    }
-                } else {
-                    ui.painter().text(
-                        rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "No video feed",
-                        egui::FontId::proportional(16.0),
-                        egui::Color32::from_gray(180),
-                    );
-                }
-            });
-        });
-    });
-
-    ui.add_space(10.0);
-    ui.separator();
-    ui.add_space(10.0);
-
-    // Bottom: merged rotation box with DYNAMIC heights
-    ui.group(|ui| {
-        ui.heading("Arm Rotation");
-        ui.add_space(6.0);
-        ui.vertical(|ui| {
-            self.render_arm_rotation_panel_dynamic(ui, "left");
-            ui.add_space(8.0);
-            self.render_arm_rotation_panel_dynamic(ui, "right");
-        });
-    });
-}
-    
-    
-    fn render_analysis_view(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Data Analysis");
-        
-        // Render charts and statistics
-        ui.horizontal(|ui| {
-            ui.group(|ui| {
-                ui.heading("Rotation History");
-                self.render_rotation_chart(ui);
-            });
+            return result
             
-            ui.group(|ui| {
-                ui.heading("Statistics");
-                self.render_statistics_panel(ui);
-            });
-        });
-        
-        ui.separator();
-        
-        // Data export section
-        ui.group(|ui| {
-            ui.heading("Export Data");
-            if ui.button("Export to CSV").clicked() {
-                self.export_data_to_csv();
-            }
-            if ui.button("Generate Report").clicked() {
-                self.generate_report();
-            }
-        });
-    }
+        except Exception as e:
+            print(f"Error processing frame: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            return {'pose_landmarks': [], 'hand_landmarks': []}
     
-    fn render_video_panel(&mut self, ui: &mut egui::Ui, with_overlay: bool) {
-    // Delegate to the unified version above that properly reserves layout space
-    self.render_video_panel_with_overlay(ui, with_overlay);
-}
-    
-    fn render_gesture_panel(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            // Left arm gesture
-            ui.vertical(|ui| {
-                ui.label("Left Arm:");
-                let gesture = self.current_result.left_gesture.as_ref()
-                    .or(self.last_valid_result.as_ref().and_then(|r| r.left_gesture.as_ref()));
-
-                if let Some(gesture) = gesture {
-                    let color = match gesture.gesture_type {
-                        GestureType::Supination => egui::Color32::from_rgb(76, 175, 80),
-                        GestureType::Pronation => egui::Color32::from_rgb(255, 152, 0),
-                        GestureType::None => egui::Color32::GRAY,
-                    };
-                    
-                    ui.colored_label(color, format!("{:?}", gesture.gesture_type));
-                    ui.label(format!("Confidence: {:.1}%", gesture.confidence * 100.0));
-                    ui.label(format!("Angle: {:.1}°", gesture.angle.to_degrees()));
-                } else {
-                    ui.colored_label(egui::Color32::GRAY, "No detection");
-                }
-            });
-            
-            ui.separator();
-            
-            // Right arm gesture
-            ui.vertical(|ui| {
-                ui.label("Right Arm:");
-
-                let gesture = self.current_result.right_gesture.as_ref()
-                    .or(self.last_valid_result.as_ref().and_then(|r| r.right_gesture.as_ref()));
-
-                if let Some(gesture) = gesture {
-                    let color = match gesture.gesture_type {
-                        GestureType::Supination => egui::Color32::from_rgb(76, 175, 80),
-                        GestureType::Pronation => egui::Color32::from_rgb(255, 152, 0),
-                        GestureType::None => egui::Color32::GRAY,
-                    };
-                    
-                    ui.colored_label(color, format!("{:?}", gesture.gesture_type));
-                    ui.label(format!("Confidence: {:.1}%", gesture.confidence * 100.0));
-                    ui.label(format!("Angle: {:.1}°", gesture.angle.to_degrees()));
-                } else {
-                    ui.colored_label(egui::Color32::GRAY, "No detection");
-                }
-            });
-        });
-    }
-    
-fn render_arm_rotation_panel_dynamic(&mut self, ui: &mut egui::Ui, side: &str) {
-    let gesture = if side == "left" {
-        self.current_result.left_gesture.as_ref()
-            .or(self.last_valid_result.as_ref().and_then(|r| r.left_gesture.as_ref()))
-    } else {
-        self.current_result.right_gesture.as_ref()
-            .or(self.last_valid_result.as_ref().and_then(|r| r.right_gesture.as_ref()))
-    };
-
-    ui.group(|ui| {
-        ui.horizontal(|ui| {
-            // Title on the left
-            ui.label(
-                egui::RichText::new(format!("{} Arm", if side == "left" { "Left" } else { "Right" }))
-                    .size(18.0)
-                    .strong()
-            );
-            
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(gesture) = gesture {
-                    // Display gesture type with colored badge
-                    let (bg_color, text_color, text) = match gesture.gesture_type {
-                        GestureType::Supination => (
-                            egui::Color32::from_rgb(76, 175, 80), 
-                            egui::Color32::WHITE,
-                            "Supination"
-                        ),
-                        GestureType::Pronation => (
-                            egui::Color32::from_rgb(255, 152, 0), 
-                            egui::Color32::BLACK,
-                            "Pronation"
-                        ),
-                        GestureType::None => (
-                            egui::Color32::from_rgb(100, 100, 100), 
-                            egui::Color32::WHITE,
-                            "None"
-                        ),
-                    };
-                    
-                    let badge = egui::Button::new(
-                        egui::RichText::new(text)
-                            .color(text_color)
-                            .size(16.0)
-                            .strong()
-                    )
-                    .fill(bg_color)
-                    .sense(egui::Sense::hover());
-                    
-                    ui.add(badge);
-                }
-            });
-        });
+    def run(self):
+        print("READY", file=sys.stdout)
+        sys.stdout.flush()
+        print("MediaPipe service ready with hands tracking", file=sys.stderr)
         
-        ui.add_space(8.0);
-        
-        if let Some(gesture) = gesture {
-            // Show detailed information when gesture is detected
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!("Confidence: {:.1}%", gesture.confidence * 100.0))
-                            .size(15.0)
-                    );
-                    ui.label(
-                        egui::RichText::new(format!("Rotation Angle: {:.1}°", gesture.angle.to_degrees()))
-                            .size(15.0)
-                    );
-                });
+        while True:
+            try:
+                line = sys.stdin.readline()
+                if not line:
+                    print("End of input stream", file=sys.stderr)
+                    break
                 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Visual confidence meter
-                    let confidence_color = if gesture.confidence > 0.8 {
-                        egui::Color32::from_rgb(76, 175, 80)
-                    } else if gesture.confidence > 0.5 {
-                        egui::Color32::from_rgb(255, 193, 7)
-                    } else {
-                        egui::Color32::from_rgb(244, 67, 54)
-                    };
-                    
-                    let bar_width = 100.0;
-                    let bar_height = 20.0;
-                    let (rect, _response) = ui.allocate_exact_size(
-                        egui::vec2(bar_width, bar_height),
-                        egui::Sense::hover()
-                    );
-                    
-                    // Background
-                    ui.painter().rect_filled(
-                        rect,
-                        egui::Rounding::same(4.0),
-                        egui::Color32::from_gray(60)
-                    );
-                    
-                    // Confidence bar
-                    let filled_width = bar_width * (gesture.confidence as f32);
-                    let filled_rect = egui::Rect::from_min_size(
-                        rect.min,
-                        egui::vec2(filled_width, bar_height)
-                    );
-                    ui.painter().rect_filled(
-                        filled_rect,
-                        egui::Rounding::same(4.0),
-                        confidence_color
-                    );
-                });
-            });
-        } else {
-            // Compact display when no gesture detected
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("No rotation detected")
-                        .size(15.0)
-                        .color(egui::Color32::GRAY)
-                );
-            });
-        }
-        
-        ui.add_space(4.0);
-    });
-}
-
-fn draw_tracking_overlay(&self, ui: &mut egui::Ui, rect: egui::Rect) {
-    let painter = ui.painter();
-    
-    // Draw skeleton connections
-    let connections = vec![
-        ("left_shoulder", "left_elbow"),
-        ("left_elbow", "left_wrist"),
-        ("right_shoulder", "right_elbow"),
-        ("right_elbow", "right_wrist"),
-        ("left_shoulder", "right_shoulder"),
-    ];
-    
-    for (from, to) in connections {
-        if let (Some(from_joint), Some(to_joint)) = (
-            self.current_result.joints.get(from),
-            self.current_result.joints.get(to),
-        ) {
-            let from_pos = egui::pos2(
-                rect.left() + from_joint.position.x as f32 * rect.width(),
-                rect.top() + from_joint.position.y as f32 * rect.height(),
-            );
-            let to_pos = egui::pos2(
-                rect.left() + to_joint.position.x as f32 * rect.width(),
-                rect.top() + to_joint.position.y as f32 * rect.height(),
-            );
-            
-            painter.line_segment(
-                [from_pos, to_pos],
-                egui::Stroke::new(3.0, egui::Color32::from_rgb(0, 255, 0)),
-            );
-        }
-    }
-    
-    // Draw joints
-    for (name, joint) in &self.current_result.joints {
-        let pos = egui::pos2(
-            rect.left() + joint.position.x as f32 * rect.width(),
-            rect.top() + joint.position.y as f32 * rect.height(),
-        );
-        
-        let color = if name.contains("left") {
-            egui::Color32::from_rgb(255, 0, 0)
-        } else {
-            egui::Color32::from_rgb(0, 0, 255)
-        };
-        
-        painter.circle_filled(pos, 8.0, color);
-        painter.circle_stroke(pos, 10.0, egui::Stroke::new(2.0, egui::Color32::WHITE));
-    }
-
-    // Draw hand landmarks and connections
-    for (side, hand) in &self.current_result.hands {
-        if !hand.is_tracked {
-            continue;
-        }
-        
-        let hand_color = if side == "left" {
-            egui::Color32::from_rgb(255, 100, 100)
-        } else {
-            egui::Color32::from_rgb(100, 100, 255)
-        };
-        
-        // Draw hand landmarks
-        for (i, landmark) in hand.landmarks.iter().enumerate() {
-            let pos = egui::pos2(
-                rect.left() + landmark.x as f32 * rect.width(),
-                rect.top() + landmark.y as f32 * rect.height(),
-            );
-            
-            // Larger circle for wrist, smaller for other landmarks
-            let radius = if i == 0 { 6.0 } else { 3.0 };
-            painter.circle_filled(pos, radius, hand_color);
-        }
-        
-        // Draw connections between finger joints
-        let finger_connections = [
-            // Thumb
-            (0, 1), (1, 2), (2, 3), (3, 4),
-            // Index
-            (0, 5), (5, 6), (6, 7), (7, 8),
-            // Middle
-            (0, 9), (9, 10), (10, 11), (11, 12),
-            // Ring
-            (0, 13), (13, 14), (14, 15), (15, 16),
-            // Pinky
-            (0, 17), (17, 18), (18, 19), (19, 20),
-        ];
-        
-        for (from, to) in finger_connections.iter() {
-            if *from < hand.landmarks.len() && *to < hand.landmarks.len() {
-                let from_pos = egui::pos2(
-                    rect.left() + hand.landmarks[*from].x as f32 * rect.width(),
-                    rect.top() + hand.landmarks[*from].y as f32 * rect.height(),
-                );
-                let to_pos = egui::pos2(
-                    rect.left() + hand.landmarks[*to].x as f32 * rect.width(),
-                    rect.top() + hand.landmarks[*to].y as f32 * rect.height(),
-                );
+                frame_data = json.loads(line)
+                result = self.process_frame(frame_data)
+                print(json.dumps(result))
+                sys.stdout.flush()
                 
-                painter.line_segment(
-                    [from_pos, to_pos],
-                    egui::Stroke::new(2.0, hand_color.linear_multiply(0.7)),
-                );
-            }
-        }
-    }
-}
+            except json.JSONDecodeError as e:
+                print(f"JSON decode error: {e}", file=sys.stderr)
+                print(json.dumps({'pose_landmarks': [], 'hand_landmarks': []}))
+                sys.stdout.flush()
+            except Exception as e:
+                print(f"Service error: {e}", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
+                print(json.dumps({'pose_landmarks': [], 'hand_landmarks': []}))
+                sys.stdout.flush()
+
+if __name__ == '__main__':
+    try:
+        service = MediaPipeService()
+        service.run()
+    except Exception as e:
+        print(f"Failed to start service: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
-    
-    fn render_joint_panel(&mut self, ui: &mut egui::Ui) {
-        // Implementation for joint tracking visualization
-        ui.label("Joint tracking information...");
-    }
-    
-    fn render_rotation_chart(&mut self, ui: &mut egui::Ui) {
-        // Implementation for rotation history chart
-        ui.label("Rotation history chart...");
-    }
-    
-    fn render_statistics_panel(&mut self, ui: &mut egui::Ui) {
-        // Implementation for statistics display
-        ui.label("Statistics...");
-    }
-    
-    fn render_control_panel(&mut self, ctx: &egui::Context) {
-    egui::TopBottomPanel::bottom("controls").show(ctx, |ui| {
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            // Camera controls (Live mode only)
-            if self.mode == AppMode::Live {
-                if self.video_source.is_some() {
-                    let stop_cam = egui::Button::new(
-                        egui::RichText::new("⏹ Stop Camera").color(egui::Color32::WHITE)
-                    ).fill(egui::Color32::from_rgb(244, 67, 54));
-                    if ui.add_sized([140.0, 40.0], stop_cam).clicked() {
-                        self.stop_camera();
-                    }
+================================================
+FILE: python/requirements.txt
+================================================
+mediapipe>=0.10.0
+opencv-python>=4.8.0
+numpy>=1.24.0
 
-                    ui.separator();
-                    self.render_tracking_status(ui);
-                } else {
-                    let start_cam = egui::Button::new(
-                        egui::RichText::new("📷 Start Camera").color(egui::Color32::WHITE)
-                    ).fill(egui::Color32::from_rgb(33, 150, 243));
-                    if ui.add_sized([140.0, 40.0], start_cam).clicked() {
-                        self.start_camera();
-                    }
-                }
-                ui.separator();
-            }
 
-            // Record controls (hidden in Playback mode)
-            if self.mode != AppMode::Playback {
-                if self.is_recording {
-                    let stop_rec = egui::Button::new(
-                        egui::RichText::new("⏹ Stop Recording").color(egui::Color32::WHITE)
-                    ).fill(egui::Color32::from_rgb(244, 67, 54));
-                    if ui.add_sized([160.0, 40.0], stop_rec).clicked() {
-                        self.toggle_recording();
-                    }
-                } else {
-                    let start_rec = egui::Button::new(
-                        egui::RichText::new("⏺ Record").color(egui::Color32::WHITE)
-                    ).fill(egui::Color32::from_rgb(76, 175, 80));
-                    if ui.add_sized([140.0, 40.0], start_rec).clicked() {
-                        self.toggle_recording();
-                    }
-                }
-                ui.separator();
-            }
-
-            // Video file playback controls
-            if self.mode == AppMode::VideoFile {
-                if ui.button(if self.is_playing { "⏸" } else { "▶" }).clicked() {
-                    self.is_playing = !self.is_playing;
-                }
-                ui.add(
-                    egui::Slider::new(&mut self.video_progress, 0.0..=100.0)
-                        .text("Progress").suffix("%")
-                );
-                ui.separator();
-            }
-
-            // Arm toggles (Live mode only)
-            if self.mode == AppMode::Live {
-                ui.checkbox(&mut self.settings.enable_left_arm, "Left Arm");
-                ui.checkbox(&mut self.settings.enable_right_arm, "Right Arm");
-                ui.checkbox(&mut self.settings.enable_fingers, "Fingers");
-            }
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if self.is_recording {
-                    let duration = self.recording_duration;
-                    let minutes = duration.as_secs() / 60;
-                    let seconds = duration.as_secs() % 60;
-                    ui.label(
-                        egui::RichText::new(format!("Recording: {:02}:{:02}", minutes, seconds))
-                            .color(egui::Color32::from_rgb(244, 67, 54)),
-                    );
-                }
-            });
-        });
-        ui.add_space(10.0);
-    });
-}
-
-    
-    fn get_current_frame_texture(&self) -> Option<egui::TextureId> {
-        self.current_frame_texture.as_ref().map(|t| t.id())
-    }
-    
-    fn export_data_to_csv(&self) {
-        // Implementation for CSV export
-        eprintln!("Exporting data to CSV...");
-    }
-    
-    fn generate_report(&self) {
-        // Implementation for report generation
-        eprintln!("Generating report...");
-    }
-    
-    fn render_settings_window(&mut self, ctx: &egui::Context) {
-        egui::Window::new("Settings")
-            .open(&mut self.show_settings)
-            .resizable(true)
-            .default_size([400.0, 500.0])
-            .show(ctx, |ui| {
-                ui.heading("Tracking Settings");
-                
-                ui.add_space(10.0);
-                
-                ui.label("Confidence Threshold:");
-                ui.add(egui::Slider::new(&mut self.settings.confidence_threshold, 0.0..=1.0)
-                    .step_by(0.01));
-                
-                ui.label("Smoothing Factor:");
-                ui.add(egui::Slider::new(&mut self.settings.smoothing_factor, 0.0..=1.0)
-                    .step_by(0.01));
-                
-                ui.separator();
-                
-                ui.heading("Video Settings");
-                
-                ui.label("Quality:");
-                egui::ComboBox::from_label("")
-                    .selected_text(format!("{:?}", self.settings.video_quality))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.settings.video_quality, VideoQuality::Low, "Low");
-                        ui.selectable_value(&mut self.settings.video_quality, VideoQuality::Medium, "Medium");
-                        ui.selectable_value(&mut self.settings.video_quality, VideoQuality::High, "High");
-                        ui.selectable_value(&mut self.settings.video_quality, VideoQuality::Ultra, "Ultra");
-                    });
-                
-                ui.separator();
-                
-                ui.heading("Output Settings");
-                
-                ui.checkbox(&mut self.settings.auto_save, "Auto-save recordings");
-                
-                ui.label("Output Directory:");
-                ui.label(self.settings.output_directory.display().to_string());
-                if ui.button("Browse...").clicked() {
-                    // Open file dialog
-                    eprintln!("File browser not yet implemented");
-                }
-            });
-    }
-    
-   fn render_about_window(&mut self, ctx: &egui::Context) {
-        egui::Window::new("About")
-            .open(&mut self.show_about)
-            .resizable(false)
-            .default_size([420.0, 320.0])
-            .show(ctx, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.heading("Supro Arm Tracker");
-                    ui.label("Version 1.0.0");
-                    ui.add_space(12.0);
-                    ui.label("A sophisticated motion tracking application");
-                    ui.label("for analyzing arm rotation patterns.");
-                    ui.add_space(16.0);
-                    ui.hyperlink("https://github.com/Juliorodrigo23/Supro");
-                });
-            });
-    }
-}
-
-impl eframe::App for ArmTrackerApp {
-
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        #[cfg(target_os = "macos")]
-        if !self.macos_icon_set {
-            crate::set_macos_dock_icon_from_bundle();
-            self.macos_icon_set = true;
-        }
-        
-        // Update MediaPipe status
-        self.update_mediapipe_status();
-        
-        // Update recording duration if recording
-        if self.is_recording {
-            if let Some(start) = self.recording_start {
-                self.recording_duration = Local::now()
-                    .signed_duration_since(start)
-                    .to_std()
-                    .unwrap_or_default();
-            }
-        }
-        
-        // Process video frame
-        if let Some(video_source) = self.video_source.as_mut() {
-            match video_source.read_frame() {
-                Ok(frame) => {
-                    // Process EVERY frame - no skipping
-                    if let Ok(mut tracker) = self.tracker.lock() {
-                        match tracker.process_frame(&frame) {
-                            Ok(tracking_result) => {
-                                self.current_result = tracking_result.clone();
-
-                                if tracking_result.left_gesture.is_some() || tracking_result.right_gesture.is_some() {
-                                    self.last_valid_result = Some(tracking_result.clone());
-                                }
-
-                                self.tracking_history.push(tracking_result);
-                                
-                                if self.tracking_history.len() > 1000 {
-                                    self.tracking_history.remove(0);
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("Tracking error: {}", e);
-                            }
-                        }
-                    }
-            
-
-                    let size = [frame.width() as usize, frame.height() as usize];
-                    let rgba = frame.to_rgba8();
-                    let pixels = rgba.as_flat_samples();
-                    
-                    let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                        size,
-                        pixels.as_slice(),
-                    );
-                    
-                    // Update or create texture
-                    if let Some(texture) = &mut self.current_frame_texture {
-                        texture.set(color_image, Default::default());
-                    } else {
-                        self.current_frame_texture = Some(ctx.load_texture(
-                            "video_frame",
-                            color_image,
-                            Default::default(),
-                        ));
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Failed to read frame: {}", e);
-                }
-            }
-        }
-
-        // Render UI components
-        self.render_header(ctx);
-        self.render_control_panel(ctx);
-        
-        if self.show_settings {
-            self.render_settings_window(ctx);
-        }
-        
-        if self.show_about {
-            self.render_about_window(ctx);
-        }
-        
-        self.render_main_content(ctx);
-        
-        ctx.request_repaint();
-        }
-        
-    }
-
-================================================================================
-FILE: data.rs
-================================================================================
-
+================================================
+FILE: src/data.rs
+================================================
 // src/data.rs
 use crate::tracking::{TrackingResult, GestureType};
 use csv::Writer;
@@ -1500,10 +1047,10 @@ impl DataExporter {
     }
 }
 
-================================================================================
-FILE: main.rs
-================================================================================
 
+================================================
+FILE: src/main.rs
+================================================
 // src/main.rs
 mod app;
 mod tracking;
@@ -1667,10 +1214,10 @@ fn create_visuals() -> egui::Visuals {
     visuals
 }
 
-================================================================================
-FILE: mediapipe_bridge.rs
-================================================================================
 
+================================================
+FILE: src/mediapipe_bridge.rs
+================================================
 // src/mediapipe_bridge.rs
 use anyhow::{Result, Context};
 use nalgebra::Vector3;
@@ -1841,10 +1388,10 @@ impl Drop for MediaPipeWrapper {
     }
 }
 
-================================================================================
-FILE: tracking.rs
-================================================================================
 
+================================================
+FILE: src/tracking.rs
+================================================
 // src/tracking.rs - Fixed version with lazy MediaPipe initialization
 use nalgebra::{Vector3, Vector6, Matrix3, Matrix6, Matrix3x6};
 use std::collections::{HashMap, VecDeque};
@@ -2592,10 +2139,10 @@ pub fn process_frame(&mut self, frame: &DynamicImage) -> Result<TrackingResult> 
 }
 
 
-================================================================================
-FILE: ui.rs
-================================================================================
 
+================================================
+FILE: src/ui.rs
+================================================
 // src/ui.rs - Fixed to use resvg's re-exported tiny_skia
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
 use image::DynamicImage;
@@ -2970,22 +2517,154 @@ impl VideoWidget {
     }
 }
 
-================================================================================
-FILE: video.rs
-================================================================================
 
-// src/video.rs - Fixed version
+================================================
+FILE: src/video.rs
+================================================
+// src/video.rs - Enhanced with video file processing and overlay capabilities
 use std::path::{Path, PathBuf};
-use anyhow::Result;
+use anyhow::{Result, Context};
 use image::{DynamicImage, ImageBuffer};
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
 use nokhwa::Camera;
 use std::sync::{Arc, Mutex};
+use std::process::{Command};
+use std::fs;
+use std::io::Write;
 
 pub enum VideoSource {
     Camera(Arc<Mutex<Camera>>),
-    File(PathBuf, VideoInfo),
+    File(VideoFileReader),
+}
+
+pub struct VideoFileReader {
+    path: PathBuf,
+    current_frame: usize,
+    total_frames: usize,
+    width: u32,
+    height: u32,
+    fps: f32,
+    frames_cache: Vec<DynamicImage>,
+    is_loaded: bool,
+}
+
+impl VideoFileReader {
+    pub fn new(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        
+        // Get video info using ffprobe
+        let output = Command::new("ffprobe")
+            .args(&[
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-count_frames",
+                "-show_entries", "stream=width,height,r_frame_rate,nb_frames",
+                "-of", "csv=p=0",
+                path.to_str().unwrap(),
+            ])
+            .output()
+            .context("Failed to run ffprobe. Is FFmpeg installed?")?;
+        
+        let info = String::from_utf8_lossy(&output.stdout);
+        let parts: Vec<&str> = info.trim().split(',').collect();
+        
+        if parts.len() < 4 {
+            return Err(anyhow::anyhow!("Failed to parse video info"));
+        }
+        
+        let width = parts[0].parse().unwrap_or(1280);
+        let height = parts[1].parse().unwrap_or(720);
+        let fps_str = parts[2];
+        let fps = if fps_str.contains('/') {
+            let fps_parts: Vec<&str> = fps_str.split('/').collect();
+            fps_parts[0].parse::<f32>().unwrap_or(30.0) / fps_parts[1].parse::<f32>().unwrap_or(1.0)
+        } else {
+            fps_str.parse().unwrap_or(30.0)
+        };
+        let total_frames = parts[3].parse().unwrap_or(0);
+        
+        Ok(Self {
+            path,
+            current_frame: 0,
+            total_frames,
+            width,
+            height,
+            fps,
+            frames_cache: Vec::new(),
+            is_loaded: false,
+        })
+    }
+    
+    pub fn load_all_frames(&mut self) -> Result<()> {
+        if self.is_loaded {
+            return Ok(());
+        }
+        
+        eprintln!("Loading video frames from: {}", self.path.display());
+        
+        // Extract frames using ffmpeg
+        let temp_dir = std::env::temp_dir().join(format!("arm_tracker_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir)?;
+        
+        // Extract frames as images
+        let status = Command::new("ffmpeg")
+            .args(&[
+                "-i", self.path.to_str().unwrap(),
+                "-vf", "scale=640:480",
+                &format!("{}/frame_%04d.png", temp_dir.display()),
+            ])
+            .status()
+            .context("Failed to extract frames with ffmpeg")?;
+        
+        if !status.success() {
+            return Err(anyhow::anyhow!("FFmpeg frame extraction failed"));
+        }
+        
+        // Load extracted frames
+        self.frames_cache.clear();
+        for i in 1..=self.total_frames {
+            let frame_path = temp_dir.join(format!("frame_{:04}.png", i));
+            if frame_path.exists() {
+                let img = image::open(&frame_path)?;
+                self.frames_cache.push(img);
+            }
+        }
+        
+        // Clean up temp files
+        let _ = fs::remove_dir_all(&temp_dir);
+        
+        self.is_loaded = true;
+        eprintln!("Loaded {} frames", self.frames_cache.len());
+        Ok(())
+    }
+    
+    pub fn get_frame(&mut self, index: usize) -> Option<DynamicImage> {
+        if !self.is_loaded {
+            let _ = self.load_all_frames();
+        }
+        self.frames_cache.get(index).cloned()
+    }
+    
+    pub fn next_frame(&mut self) -> Option<DynamicImage> {
+        let frame = self.get_frame(self.current_frame);
+        if frame.is_some() {
+            self.current_frame = (self.current_frame + 1) % self.total_frames;
+        }
+        frame
+    }
+    
+    pub fn seek(&mut self, frame_index: usize) {
+        self.current_frame = frame_index.min(self.total_frames - 1);
+    }
+    
+    pub fn get_progress(&self) -> f32 {
+        if self.total_frames == 0 {
+            0.0
+        } else {
+            self.current_frame as f32 / self.total_frames as f32
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -3004,16 +2683,14 @@ impl VideoSource {
         
         let camera_index = CameraIndex::Index(index as u32);
         
-        // Create a CameraFormat with the desired settings
         use nokhwa::utils::{CameraFormat, FrameFormat, Resolution};
         
         let format = CameraFormat::new(
             Resolution::new(640, 480),
-            FrameFormat::MJPEG,  // or FrameFormat::YUYV
-            30,  // frame rate
+            FrameFormat::MJPEG,
+            30,
         );
         
-        // Use the Exact variant with the CameraFormat
         let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Exact(format));
         
         eprintln!("DEBUG: Creating camera object...");
@@ -3028,16 +2705,8 @@ impl VideoSource {
     }
     
     pub fn new_file(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref().to_path_buf();
-        let info = VideoInfo {
-            path: path.clone(),
-            fps: 30.0,
-            frame_count: 1000,
-            width: 1280,
-            height: 720,
-            current_frame: 0,
-        };
-        Ok(VideoSource::File(path, info))
+        let reader = VideoFileReader::new(path)?;
+        Ok(VideoSource::File(reader))
     }
     
     pub fn read_frame(&mut self) -> Result<DynamicImage> {
@@ -3045,26 +2714,21 @@ impl VideoSource {
             VideoSource::Camera(camera) => {
                 let mut cam = camera.lock().unwrap();
                 
-                // Open stream if not already open
                 if !cam.is_stream_open() {
                     cam.open_stream()
                         .map_err(|e| anyhow::anyhow!("Failed to open camera stream: {}", e))?;
                 }
                 
-                // Capture frame
                 let frame = cam.frame()
                     .map_err(|e| anyhow::anyhow!("Failed to capture frame: {}", e))?;
                 
-                // Get frame data
                 let decoded = frame.decode_image::<RgbFormat>()
                     .map_err(|e| anyhow::anyhow!("Failed to decode frame: {}", e))?;
                 
-                // Convert to DynamicImage
                 let width = decoded.width();
                 let height = decoded.height();
-                let rgb_data = decoded.into_vec();  // Changed from into_flat_vec()
+                let rgb_data = decoded.into_vec();
                 
-                // Convert RGB to RGBA
                 let mut rgba_data = Vec::with_capacity((width * height * 4) as usize);
                 for chunk in rgb_data.chunks(3) {
                     rgba_data.push(chunk[0]);
@@ -3077,12 +2741,11 @@ impl VideoSource {
                     .ok_or_else(|| anyhow::anyhow!("Failed to create image buffer"))?;
                 
                 let flipped = image::imageops::flip_horizontal(&img);
-            
                 Ok(DynamicImage::ImageRgba8(flipped))
             }
-            VideoSource::File(_, _) => {
-                // For file playback, return a placeholder for now
-                Ok(DynamicImage::new_rgba8(1280, 720))
+            VideoSource::File(reader) => {
+                reader.next_frame()
+                    .ok_or_else(|| anyhow::anyhow!("No more frames in video"))
             }
         }
     }
@@ -3095,21 +2758,35 @@ impl VideoSource {
                 Some(VideoInfo {
                     path: PathBuf::from("camera://0"),
                     fps: cam.frame_rate() as f64,
-                    frame_count: -1, // Infinite for camera
+                    frame_count: -1,
                     width: resolution.width() as i32,
                     height: resolution.height() as i32,
                     current_frame: 0,
                 })
             }
-            VideoSource::File(_, info) => Some(info.clone()),
+            VideoSource::File(reader) => Some(VideoInfo {
+                path: reader.path.clone(),
+                fps: reader.fps as f64,
+                frame_count: reader.total_frames as i32,
+                width: reader.width as i32,
+                height: reader.height as i32,
+                current_frame: reader.current_frame as i32,
+            }),
         }
     }
     
     pub fn seek(&mut self, frame_number: i32) -> Result<()> {
-        if let VideoSource::File(_, ref mut info) = self {
-            info.current_frame = frame_number;
+        if let VideoSource::File(reader) = self {
+            reader.seek(frame_number as usize);
         }
         Ok(())
+    }
+    
+    pub fn get_progress(&self) -> f32 {
+        match self {
+            VideoSource::Camera(_) => 0.0,
+            VideoSource::File(reader) => reader.get_progress(),
+        }
     }
 }
 
@@ -3124,459 +2801,218 @@ impl Drop for VideoSource {
 }
 
 pub struct VideoRecorder {
-    output_path: PathBuf,
+    output_dir: PathBuf,
+    session_id: String,
     fps: f64,
     frame_count: i32,
     frames: Vec<DynamicImage>,
+    overlay_frames: Vec<DynamicImage>,
+    width: u32,
+    height: u32,
 }
 
 impl VideoRecorder {
     pub fn new(
-        output_path: impl AsRef<Path>,
-        _width: i32,
-        _height: i32,
+        output_dir: impl AsRef<Path>,
+        width: u32,
+        height: u32,
         fps: f64,
     ) -> Result<Self> {
-        let path = output_path.as_ref().to_path_buf();
+        let session_id = format!("recording_{}", chrono::Local::now().format("%Y%m%d_%H%M%S"));
+        let output_dir = output_dir.as_ref().join(&session_id);
         
-        // Ensure output directory exists
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        // Create output directory
+        std::fs::create_dir_all(&output_dir)?;
         
         Ok(Self {
-            output_path: path,
+            output_dir,
+            session_id,
             fps,
             frame_count: 0,
             frames: Vec::new(),
+            overlay_frames: Vec::new(),
+            width,
+            height,
         })
     }
     
-    pub fn write_frame(&mut self, frame: &DynamicImage) -> Result<()> {
+    pub fn add_frame(&mut self, frame: &DynamicImage, overlay_frame: Option<&DynamicImage>) {
         self.frames.push(frame.clone());
+        if let Some(overlay) = overlay_frame {
+            self.overlay_frames.push(overlay.clone());
+        } else {
+            self.overlay_frames.push(frame.clone());
+        }
         self.frame_count += 1;
+    }
+    
+    pub fn save_videos(&self) -> Result<(PathBuf, PathBuf)> {
+        let raw_video_path = self.output_dir.join("raw_video.mp4");
+        let overlay_video_path = self.output_dir.join("overlay_video.mp4");
+        
+        // Save raw video
+        self.save_video_from_frames(&self.frames, &raw_video_path)?;
+        
+        // Save overlay video
+        self.save_video_from_frames(&self.overlay_frames, &overlay_video_path)?;
+        
+        Ok((raw_video_path, overlay_video_path))
+    }
+    
+    fn save_video_from_frames(&self, frames: &[DynamicImage], output_path: &Path) -> Result<()> {
+        // Create temp directory for frames
+        let temp_dir = self.output_dir.join("temp_frames");
+        std::fs::create_dir_all(&temp_dir)?;
+        
+        // Save frames as images
+        for (i, frame) in frames.iter().enumerate() {
+            let frame_path = temp_dir.join(format!("frame_{:05}.png", i));
+            frame.save(&frame_path)?;
+        }
+        
+        // Use ffmpeg to create video
+        let status = Command::new("ffmpeg")
+            .args(&[
+                "-y",
+                "-r", &self.fps.to_string(),
+                "-i", &format!("{}/frame_%05d.png", temp_dir.display()),
+                "-c:v", "libx264",
+                "-preset", "medium",
+                "-crf", "23",
+                "-pix_fmt", "yuv420p",
+                output_path.to_str().unwrap(),
+            ])
+            .status()
+            .context("Failed to run ffmpeg")?;
+        
+        // Clean up temp frames
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        
+        if !status.success() {
+            return Err(anyhow::anyhow!("FFmpeg video encoding failed"));
+        }
+        
         Ok(())
     }
     
-    pub fn finalize(self) -> Result<PathBuf> {
-        // For demo, save frames as individual images
-        if let Some(parent) = self.output_path.parent() {
-            for (i, frame) in self.frames.iter().enumerate() {
-                let path = parent.join(format!("frame_{:04}.png", i));
-                frame.save(&path)?;
-            }
-        }
-        Ok(self.output_path)
-    }
-    
-    pub fn get_frame_count(&self) -> i32 {
-        self.frame_count
-    }
-    
-    pub fn get_duration(&self) -> f64 {
-        self.frame_count as f64 / self.fps
+    pub fn get_output_dir(&self) -> &Path {
+        &self.output_dir
     }
 }
 
-################################################################################
-# EXTRA FILES (appended after source tree)
-################################################################################
+// Video gallery management
+pub struct VideoGallery {
+    videos_dir: PathBuf,
+    videos: Vec<VideoEntry>,
+}
 
+#[derive(Clone)]
+pub struct VideoEntry {
+    pub path: PathBuf,
+    pub thumbnail: Option<DynamicImage>,
+    pub name: String,
+    pub date: chrono::DateTime<chrono::Local>,
+    pub has_overlay: bool,
+    pub has_csv: bool,
+}
 
-================================================================================
-EXTRA FILE: /Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/Cargo.toml
-================================================================================
-
-[package]
-name = "arm_tracker"
-version = "0.1.0"
-edition = "2021"
-
-[package.metadata.bundle]
-name = "Arm Tracker"
-identifier = "com.armtracker.app"
-icon = ["assets/AppIcon.icns"]
-version = "1.0.0"
-copyright = "Copyright (c) 2025"
-category = "DeveloperTool" 
-short_description = "Arm rotation tracking system"
-long_description = "A sophisticated motion tracking application for analyzing arm rotation patterns"
-osx_minimum_system_version = "10.13"
-
-[package.metadata.bundle.osx]
-info_plist_path = "/Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/Info.plist"
-
-
-
-[dependencies]
-# GUI Framework
-eframe = "0.24"
-egui = "0.24"
-egui_extras = "0.24"
-image = { version = "0.24", features = ["jpeg", "png"] }
-cocoa = "0.25"
-objc = "0.2"
-
-# Camera support
-nokhwa = { version = "0.10", features = ["input-native", "output-threaded"] }
-
-# SVG support for logo - use only resvg's dependencies
-resvg = "0.35"
-usvg = "0.35"
-# Remove direct tiny-skia, use resvg's re-export instead
-
-# Math and Linear Algebra
-nalgebra = "0.32"
-nalgebra-glm = "0.18"
-
-# Async Runtime
-tokio = { version = "1.35", features = ["full"] }
-
-# Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-csv = "1.3"
-
-# Time and Date
-chrono = "0.4"
-
-# File System
-directories = "5.0"
-
-# Error Handling
-anyhow = "1.0"
-thiserror = "1.0"
-
-# Logging
-tracing = "0.1"
-tracing-subscriber = "0.3"
-
-# Basic utilities
-once_cell = "1.19"
-
-[[bin]]
-name = "arm_tracker"
-path = "src/main.rs"
-
-================================================================================
-EXTRA FILE: /Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/build.sh
-================================================================================
-
-#!/bin/bash
-set -euo pipefail
-
-echo "Building bundle..."
-cargo bundle --release
-
-APP="target/release/bundle/osx/Arm Tracker.app"
-PLIST="$APP/Contents/Info.plist"
-RES="$APP/Contents/Resources"
-
-# Your .icns built from PNG beforehand and tracked by Cargo.toml:
-# [package.metadata.bundle]
-# icon = ["assets/AppIcon.icns"]
-ASSETS_ICNS="assets/AppIcon.icns"
-
-echo "Ensuring AppIcon.icns exists inside the bundle..."
-if [[ ! -f "$RES/AppIcon.icns" ]]; then
-  echo "  - AppIcon.icns not found in bundle Resources. Attempting to copy from assets/..."
-  mkdir -p "$RES"
-  if [[ -f "$ASSETS_ICNS" ]]; then
-    cp "$ASSETS_ICNS" "$RES/AppIcon.icns"
-    echo "  - Copied: $ASSETS_ICNS -> $RES/AppIcon.icns"
-  else
-    echo "ERROR: $ASSETS_ICNS not found. Build AppIcon.icns from your 1024x1024 PNG first."
-    echo "Hint:"
-    echo "  mkdir -p assets/AppIcon.iconset"
-    echo "  sips -z 16 16     appicon_1024.png --out assets/AppIcon.iconset/icon_16x16.png"
-    echo "  sips -z 32 32     appicon_1024.png --out assets/AppIcon.iconset/icon_16x16@2x.png"
-    echo "  sips -z 32 32     appicon_1024.png --out assets/AppIcon.iconset/icon_32x32.png"
-    echo "  sips -z 64 64     appicon_1024.png --out assets/AppIcon.iconset/icon_32x32@2x.png"
-    echo "  sips -z 128 128   appicon_1024.png --out assets/AppIcon.iconset/icon_128x128.png"
-    echo "  sips -z 256 256   appicon_1024.png --out assets/AppIcon.iconset/icon_128x128@2x.png"
-    echo "  sips -z 256 256   appicon_1024.png --out assets/AppIcon.iconset/icon_256x256.png"
-    echo "  sips -z 512 512   appicon_1024.png --out assets/AppIcon.iconset/icon_256x256@2x.png"
-    echo "  sips -z 512 512   appicon_1024.png --out assets/AppIcon.iconset/icon_512x512.png"
-    echo "  cp appicon_1024.png assets/AppIcon.iconset/icon_512x512@2x.png"
-    echo "  iconutil -c icns assets/AppIcon.iconset -o assets/AppIcon.icns"
-    exit 1
-  fi
-fi
-
-echo "Setting icon and permissions keys in Info.plist..."
-
-# Ensure CFBundleIconName = AppIcon (no extension)
-# If the key exists, set; otherwise, add.
-if /usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$PLIST" >/dev/null 2>&1; then
-  /usr/libexec/PlistBuddy -c 'Set :CFBundleIconName AppIcon' "$PLIST"
-else
-  /usr/libexec/PlistBuddy -c 'Add :CFBundleIconName string AppIcon' "$PLIST"
-fi
-
-# If legacy CFBundleIconFile exists and has an extension, fix it (macOS prefers name w/o extension)
-if /usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$PLIST" >/dev/null 2>&1; then
-  /usr/libexec/PlistBuddy -c 'Set :CFBundleIconFile AppIcon' "$PLIST" || true
-fi
-
-# (Optional) Set App Store category string to Developer Tools
-if /usr/libexec/PlistBuddy -c 'Print :LSApplicationCategoryType' "$PLIST" >/dev/null 2>&1; then
-  /usr/libexec/PlistBuddy -c 'Set :LSApplicationCategoryType public.app-category.developer-tools' "$PLIST"
-else
-  /usr/libexec/PlistBuddy -c 'Add :LSApplicationCategoryType string public.app-category.developer-tools' "$PLIST"
-fi
-
-# Add/Update privacy usage descriptions
-if /usr/libexec/PlistBuddy -c 'Print :NSCameraUsageDescription' "$PLIST" >/dev/null 2>&1; then
-  /usr/libexec/PlistBuddy -c 'Set :NSCameraUsageDescription This app requires camera access to track arm rotation movements for analysis.' "$PLIST"
-else
-  /usr/libexec/PlistBuddy -c 'Add :NSCameraUsageDescription string This app requires camera access to track arm rotation movements for analysis.' "$PLIST"
-fi
-
-if /usr/libexec/PlistBuddy -c 'Print :NSMicrophoneUsageDescription' "$PLIST" >/dev/null 2>&1; then
-  /usr/libexec/PlistBuddy -c 'Set :NSMicrophoneUsageDescription Arm Tracker may record audio while capturing video.' "$PLIST"
-else
-  /usr/libexec/PlistBuddy -c 'Add :NSMicrophoneUsageDescription string Arm Tracker may record audio while capturing video.' "$PLIST"
-fi
-
-# (Nice to have) Mark high-DPI capable
-if /usr/libexec/PlistBuddy -c 'Print :NSHighResolutionCapable' "$PLIST" >/dev/null 2>&1; then
-  /usr/libexec/PlistBuddy -c 'Set :NSHighResolutionCapable true' "$PLIST"
-else
-  /usr/libexec/PlistBuddy -c 'Add :NSHighResolutionCapable bool true' "$PLIST"
-fi
-
-# (Strongly recommended) bump CFBundleVersion to avoid icon caching issues
-# If CFBundleVersion is numeric, increment; else set a fresh numeric build
-if /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$PLIST" >/dev/null 2>&1; then
-  CUR_VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$PLIST" || echo 0)"
-  if [[ "$CUR_VER" =~ ^[0-9]+$ ]]; then
-    NEW_VER=$((CUR_VER + 1))
-  else
-    NEW_VER="$(date +%s)"
-  fi
-  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $NEW_VER" "$PLIST"
-else
-  /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $(date +%s)" "$PLIST"
-fi
-
-echo ""
-echo "✓ Bundle created successfully"
-echo "Verifying keys..."
-/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST" || echo "CFBundleIdentifier missing (check Cargo.toml identifier)"
-/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$PLIST" || echo "CFBundleIconName missing"
-ls -l "$RES/AppIcon.icns" || true
-echo ""
-
-# After creating the bundle, copy Python files
-PYTHON_DIR="$APP/Contents/Resources/python"
-mkdir -p "$PYTHON_DIR"
-cp -r python/*.py "$PYTHON_DIR/"
-echo "Copied Python scripts to bundle"
-
-# Replace old app in /Applications to avoid duplicate cache entries
-DEST="/Applications/Arm Tracker.app"
-if [[ -d "$DEST" ]]; then
-  echo "Removing old /Applications bundle..."
-  rm -rf "$DEST"
-fi
-echo "Copying new bundle to /Applications..."
-cp -R "$APP" "$DEST"
-
-echo "Refreshing Dock/Finder to clear icon caches..."
-killall Dock || true
-killall Finder || true
-
-echo "Opening app..."
-open "$DEST"
-
-echo "Done."
-
-
-================================================================================
-EXTRA FILE: /Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/python/mediapipe_service.py
-================================================================================
-
-#!/usr/bin/env python3
-import sys
-import json
-import numpy as np
-import traceback
-
-try:
-    import mediapipe as mp
-    import cv2
-except ImportError as e:
-    print(f"Error: Missing required packages: {e}", file=sys.stderr)
-    print("Install with: pip3 install mediapipe opencv-python numpy", file=sys.stderr)
-    sys.exit(1)
-
-class MediaPipeService:
-    def __init__(self):
-        # Initialize pose tracking
-        self.mp_pose = mp.solutions.pose
-        self.pose = self.mp_pose.Pose(
-            static_image_mode=False,
-            model_complexity=1,  # Changed from 0 to 1 for better accuracy
-            smooth_landmarks=True,
-            enable_segmentation=False,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5  # Increased from 0.3
-        )
-        
-        # Initialize hand tracking - ENABLED
-        self.mp_hands = mp.solutions.hands
-        self.hands = self.mp_hands.Hands(
-            static_image_mode=False,
-            max_num_hands=2,
-            model_complexity=1,  # Changed from 0 to 1
-            min_detection_confidence=0.4,  # Lowered from 0.5
-            min_tracking_confidence=0.4
-        )
-        
-        print("MediaPipe service initialized with hands enabled", file=sys.stderr)
+impl VideoGallery {
+    pub fn new(videos_dir: impl AsRef<Path>) -> Self {
+        Self {
+            videos_dir: videos_dir.as_ref().to_path_buf(),
+            videos: Vec::new(),
+        }
+    }
     
-    def process_frame(self, frame_data):
-        try:
-            width = frame_data['width']
-            height = frame_data['height']
-            data = np.array(frame_data['data'], dtype=np.uint8)
-            
-            # Reshape frame
-            frame = data.reshape((height, width, 3))
-            
-            # Process with MediaPipe
-            pose_results = self.pose.process(frame)
-            hands_results = self.hands.process(frame)
-            
-            result = {
-                'pose_landmarks': [],
-                'hand_landmarks': []
-            }
-            
-            if pose_results.pose_landmarks:
-                result['pose_landmarks'] = [
-                    [lm.x, lm.y, lm.z] 
-                    for lm in pose_results.pose_landmarks.landmark
-                ]
-            
-            # PROCESS HANDS - ENABLED
-            if hands_results.multi_hand_landmarks:
-                for hand_landmarks in hands_results.multi_hand_landmarks:
-                    hand_data = [
-                        [lm.x, lm.y, lm.z] 
-                        for lm in hand_landmarks.landmark
-                    ]
-                    result['hand_landmarks'].append(hand_data)
-            
-            return result
-            
-        except Exception as e:
-            print(f"Error processing frame: {e}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
-            return {'pose_landmarks': [], 'hand_landmarks': []}
-    
-    def run(self):
-        print("READY", file=sys.stdout)
-        sys.stdout.flush()
-        print("MediaPipe service ready with hands tracking", file=sys.stderr)
+    pub fn scan_videos(&mut self) -> Result<()> {
+        self.videos.clear();
         
-        while True:
-            try:
-                line = sys.stdin.readline()
-                if not line:
-                    print("End of input stream", file=sys.stderr)
-                    break
-                
-                frame_data = json.loads(line)
-                result = self.process_frame(frame_data)
-                print(json.dumps(result))
-                sys.stdout.flush()
-                
-            except json.JSONDecodeError as e:
-                print(f"JSON decode error: {e}", file=sys.stderr)
-                print(json.dumps({'pose_landmarks': [], 'hand_landmarks': []}))
-                sys.stdout.flush()
-            except Exception as e:
-                print(f"Service error: {e}", file=sys.stderr)
-                traceback.print_exc(file=sys.stderr)
-                print(json.dumps({'pose_landmarks': [], 'hand_landmarks': []}))
-                sys.stdout.flush()
-
-if __name__ == '__main__':
-    try:
-        service = MediaPipeService()
-        service.run()
-    except Exception as e:
-        print(f"Failed to start service: {e}", file=sys.stderr)
-        sys.exit(1)
-
-================================================================================
-EXTRA FILE: /Users/JulioContreras/Desktop/School/Research/Baseball SuPro /SuPro Rewritten/python/mediapipe_processor.py
-================================================================================
-
-#mediapipe_processor.py
-import mediapipe as mp
-import numpy as np
-import json
-import cv2
-
-class MediaPipeProcessor:
-    def __init__(self):
-        self.mp_pose = mp.solutions.pose
-        self.mp_hands = mp.solutions.hands
-        self.mp_drawing = mp.solutions.drawing_utils
-        
-        self.pose = self.mp_pose.Pose(
-            static_image_mode=False,
-            model_complexity=2,
-            smooth_landmarks=True,
-            enable_segmentation=False,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
-        
-        self.hands = self.mp_hands.Hands(
-            static_image_mode=False,
-            max_num_hands=2,
-            model_complexity=1,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
-    
-    def process_frame(self, frame_data):
-        """Process a frame and return landmarks"""
-        # Convert frame data to numpy array
-        frame = np.frombuffer(frame_data, dtype=np.uint8)
-        frame = frame.reshape((720, 1280, 3))  # Adjust dimensions as needed
-        
-        # Convert BGR to RGB
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        
-        # Process with MediaPipe
-        pose_results = self.pose.process(rgb_frame)
-        hands_results = self.hands.process(rgb_frame)
-        
-        result = {
-            'pose_landmarks': [],
-            'hand_landmarks': []
+        if !self.videos_dir.exists() {
+            std::fs::create_dir_all(&self.videos_dir)?;
         }
         
-        if pose_results.pose_landmarks:
-            result['pose_landmarks'] = [
-                [lm.x, lm.y, lm.z] 
-                for lm in pose_results.pose_landmarks.landmark
-            ]
+        // Scan for video directories
+        for entry in std::fs::read_dir(&self.videos_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            
+            if path.is_dir() {
+                // Check for raw video
+                let raw_video = path.join("raw_video.mp4");
+                if raw_video.exists() {
+                    let overlay_exists = path.join("overlay_video.mp4").exists();
+                    let csv_exists = path.join("tracking_data.csv").exists();
+                    
+                    // Generate thumbnail from first frame
+                    let thumbnail = self.extract_thumbnail(&raw_video).ok();
+                    
+                    let metadata = std::fs::metadata(&raw_video)?;
+                    let modified = metadata.modified()?;
+                    let datetime = chrono::DateTime::<chrono::Local>::from(modified);
+                    
+                    self.videos.push(VideoEntry {
+                        path: raw_video,
+                        thumbnail,
+                        name: path.file_name().unwrap().to_string_lossy().to_string(),
+                        date: datetime,
+                        has_overlay: overlay_exists,
+                        has_csv: csv_exists,
+                    });
+                }
+            }
+        }
         
-        if hands_results.multi_hand_landmarks:
-            for hand_landmarks in hands_results.multi_hand_landmarks:
-                hand_data = [
-                    [lm.x, lm.y, lm.z] 
-                    for lm in hand_landmarks.landmark
-                ]
-                result['hand_landmarks'].append(hand_data)
+        // Sort by date (newest first)
+        self.videos.sort_by(|a, b| b.date.cmp(&a.date));
         
-        return json.dumps(result)
+        Ok(())
+    }
     
-    def cleanup(self):
-        self.pose.close()
-        self.hands.close()
+    fn extract_thumbnail(&self, video_path: &Path) -> Result<DynamicImage> {
+        // Extract first frame as thumbnail
+        let temp_thumb = std::env::temp_dir().join("thumb.png");
+        
+        let status = Command::new("ffmpeg")
+            .args(&[
+                "-i", video_path.to_str().unwrap(),
+                "-vf", "scale=320:240",
+                "-vframes", "1",
+                "-y",
+                temp_thumb.to_str().unwrap(),
+            ])
+            .status()?;
+        
+        if !status.success() {
+            return Err(anyhow::anyhow!("Failed to extract thumbnail"));
+        }
+        
+        let thumb = image::open(&temp_thumb)?;
+        let _ = std::fs::remove_file(&temp_thumb);
+        
+        Ok(thumb)
+    }
+    
+    pub fn get_videos(&self) -> &[VideoEntry] {
+        &self.videos
+    }
+}
+
+Directory structure:
+└── juliorodrigo23-supro/
+    ├── README.md
+    ├── build.rs
+    ├── build.sh
+    ├── Cargo.toml
+    ├── combine.py
+    ├── Info.plist
+    ├── python/
+    │   ├── mediapipe_processor.py
+    │   ├── mediapipe_service.py
+    │   └── requirements.txt
+    └── src/
+        ├── data.rs
+        ├── main.rs
+        ├── mediapipe_bridge.rs
+        ├── tracking.rs
+        ├── ui.rs
+        └── video.rs
