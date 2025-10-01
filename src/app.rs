@@ -54,7 +54,10 @@ pub struct ArmTrackerApp {
     // Tracking data
     current_result: TrackingResult,
     tracking_history: Vec<TrackingResult>,
-    
+    last_valid_result: Option<TrackingResult>,  // ADD THIS - Store last valid tracking
+    show_overlay: bool,
+
+
     // Video processing
     selected_video: Option<PathBuf>,
     video_progress: f32,
@@ -172,6 +175,8 @@ impl ArmTrackerApp {
             recording_duration: std::time::Duration::ZERO,
             current_result: TrackingResult::default(),
             tracking_history: Vec::new(),
+            last_valid_result: None,  // ADD THIS
+            show_overlay: true,
             selected_video: None,
             video_progress: 0.0,
             is_playing: true,
@@ -462,8 +467,19 @@ impl ArmTrackerApp {
         ui.columns(2, |columns| {
             // Left column - Video feed
             columns[0].group(|ui| {
-                ui.heading("Camera Feed");
-                self.render_video_panel(ui, true);
+                ui.horizontal(|ui| {
+                    ui.heading("Camera Feed");
+                    
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Add overlay toggle button
+                        let toggle_text = if self.show_overlay { "Hide Overlay" } else { "Show Overlay" };
+                        if ui.button(toggle_text).clicked() {
+                            self.show_overlay = !self.show_overlay;
+                        }
+                    });
+                });
+                
+                self.render_video_panel(ui, self.show_overlay);  // Use show_overlay state
             });
             
             // Right column - Tracking info
@@ -486,114 +502,114 @@ impl ArmTrackerApp {
     }
     
     fn render_dual_view(&mut self, ui: &mut egui::Ui) {
-        // Top row: two video panels side-by-side with EQUAL sizes
-        ui.horizontal(|ui| {
-            let avail_w = ui.available_width();
-            let panel_w = (avail_w - 20.0) / 2.0;
-            
-            // Fixed aspect ratio for consistent sizing
-            let aspect = 16.0 / 9.0;
-            let video_display_h = (panel_w / aspect).clamp(180.0, 360.0);
+    // Top row: two video panels side-by-side with EQUAL sizes
+    ui.horizontal(|ui| {
+        let avail_w = ui.available_width();
+        let panel_w = (avail_w - 20.0) / 2.0;
+        
+        // Fixed aspect ratio for consistent sizing
+        let aspect = 16.0 / 9.0;
+        let video_display_h = (panel_w / aspect).clamp(180.0, 360.0);
 
-            // Left panel - Raw Feed
-            ui.vertical(|ui| {
-                ui.set_width(panel_w);
-                ui.group(|ui| {
-                    ui.heading("Raw Feed");
-                    ui.add_space(6.0);
-                    
-                    // Allocate exact size for video
-                    let (rect, _resp) = ui.allocate_exact_size(
-                        egui::vec2(panel_w - 20.0, video_display_h), 
-                        egui::Sense::hover()
+        // Left panel - Raw Feed
+        ui.vertical(|ui| {
+            ui.set_width(panel_w);
+            ui.group(|ui| {
+                ui.heading("Raw Feed");
+                ui.add_space(6.0);
+                
+                // Allocate exact size for video
+                let (rect, _resp) = ui.allocate_exact_size(
+                    egui::vec2(panel_w - 20.0, video_display_h), 
+                    egui::Sense::hover()
+                );
+                
+                ui.painter().rect_filled(
+                    rect, 
+                    egui::Rounding::same(8.0), 
+                    egui::Color32::from_rgb(28, 28, 34)
+                );
+                
+                if let Some(texture_id) = self.get_current_frame_texture(false) {
+                    ui.painter().image(
+                        texture_id,
+                        rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
                     );
-                    
-                    ui.painter().rect_filled(
-                        rect, 
-                        egui::Rounding::same(8.0), 
-                        egui::Color32::from_rgb(28, 28, 34)
+                } else {
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "No video feed",
+                        egui::FontId::proportional(16.0),
+                        egui::Color32::from_gray(180),
                     );
-                    
-                    if let Some(texture_id) = self.get_current_frame_texture(false) {
-                        ui.painter().image(
-                            texture_id,
-                            rect,
-                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                            egui::Color32::WHITE,
-                        );
-                    } else {
-                        ui.painter().text(
-                            rect.center(),
-                            egui::Align2::CENTER_CENTER,
-                            "No video feed",
-                            egui::FontId::proportional(16.0),
-                            egui::Color32::from_gray(180),
-                        );
-                    }
-                });
-            });
-
-            ui.add_space(20.0);
-
-            // Right panel - Tracking Overlay
-            ui.vertical(|ui| {
-                ui.set_width(panel_w);
-                ui.group(|ui| {
-                    ui.heading("Tracking Overlay");
-                    ui.add_space(6.0);
-                    
-                    // Allocate exact same size for video
-                    let (rect, _resp) = ui.allocate_exact_size(
-                        egui::vec2(panel_w - 20.0, video_display_h), 
-                        egui::Sense::hover()
-                    );
-                    
-                    ui.painter().rect_filled(
-                        rect, 
-                        egui::Rounding::same(8.0), 
-                        egui::Color32::from_rgb(28, 28, 34)
-                    );
-                    
-                    if let Some(texture_id) = self.get_current_frame_texture(true) {
-                        ui.painter().image(
-                            texture_id,
-                            rect,
-                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                            egui::Color32::WHITE,
-                        );
-                        
-                        // Draw tracking overlay
-                        if !self.current_result.tracking_lost {
-                            self.draw_tracking_overlay(ui, rect);
-                        }
-                    } else {
-                        ui.painter().text(
-                            rect.center(),
-                            egui::Align2::CENTER_CENTER,
-                            "No video feed",
-                            egui::FontId::proportional(16.0),
-                            egui::Color32::from_gray(180),
-                        );
-                    }
-                });
+                }
             });
         });
 
-        ui.add_space(10.0);
-        ui.separator();
-        ui.add_space(10.0);
+        ui.add_space(20.0);
 
-        // Bottom: merged rotation box with DYNAMIC heights
-        ui.group(|ui| {
-            ui.heading("Arm Rotation");
-            ui.add_space(6.0);
-            ui.vertical(|ui| {
-                self.render_arm_rotation_panel_dynamic(ui, "left");
-                ui.add_space(8.0);
-                self.render_arm_rotation_panel_dynamic(ui, "right");
+        // Right panel - Tracking Overlay
+        ui.vertical(|ui| {
+            ui.set_width(panel_w);
+            ui.group(|ui| {
+                ui.heading("Tracking Overlay");
+                ui.add_space(6.0);
+                
+                // Allocate exact same size for video
+                let (rect, _resp) = ui.allocate_exact_size(
+                    egui::vec2(panel_w - 20.0, video_display_h), 
+                    egui::Sense::hover()
+                );
+                
+                ui.painter().rect_filled(
+                    rect, 
+                    egui::Rounding::same(8.0), 
+                    egui::Color32::from_rgb(28, 28, 34)
+                );
+                
+                if let Some(texture_id) = self.get_current_frame_texture(true) {
+                    ui.painter().image(
+                        texture_id,
+                        rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                    
+                    // Draw tracking overlay
+                    if !self.current_result.tracking_lost {
+                        self.draw_tracking_overlay(ui, rect);
+                    }
+                } else {
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "No video feed",
+                        egui::FontId::proportional(16.0),
+                        egui::Color32::from_gray(180),
+                    );
+                }
             });
         });
-    }
+    });
+
+    ui.add_space(10.0);
+    ui.separator();
+    ui.add_space(10.0);
+
+    // Bottom: merged rotation box with DYNAMIC heights
+    ui.group(|ui| {
+        ui.heading("Arm Rotation");
+        ui.add_space(6.0);
+        ui.vertical(|ui| {
+            self.render_arm_rotation_panel_dynamic(ui, "left");
+            ui.add_space(8.0);
+            self.render_arm_rotation_panel_dynamic(ui, "right");
+        });
+    });
+}
     
     
     fn render_analysis_view(&mut self, ui: &mut egui::Ui) {
@@ -636,7 +652,10 @@ impl ArmTrackerApp {
             // Left arm gesture
             ui.vertical(|ui| {
                 ui.label("Left Arm:");
-                if let Some(gesture) = self.current_result.left_gesture.as_ref() {
+                let gesture = self.current_result.left_gesture.as_ref()
+                    .or(self.last_valid_result.as_ref().and_then(|r| r.left_gesture.as_ref()));
+
+                if let Some(gesture) = gesture {
                     let color = match gesture.gesture_type {
                         GestureType::Supination => egui::Color32::from_rgb(76, 175, 80),
                         GestureType::Pronation => egui::Color32::from_rgb(255, 152, 0),
@@ -656,7 +675,11 @@ impl ArmTrackerApp {
             // Right arm gesture
             ui.vertical(|ui| {
                 ui.label("Right Arm:");
-                if let Some(gesture) = self.current_result.right_gesture.as_ref() {
+
+                let gesture = self.current_result.right_gesture.as_ref()
+                    .or(self.last_valid_result.as_ref().and_then(|r| r.right_gesture.as_ref()));
+
+                if let Some(gesture) = gesture {
                     let color = match gesture.gesture_type {
                         GestureType::Supination => egui::Color32::from_rgb(76, 175, 80),
                         GestureType::Pronation => egui::Color32::from_rgb(255, 152, 0),
@@ -676,8 +699,10 @@ impl ArmTrackerApp {
 fn render_arm_rotation_panel_dynamic(&mut self, ui: &mut egui::Ui, side: &str) {
     let gesture = if side == "left" {
         self.current_result.left_gesture.as_ref()
+            .or(self.last_valid_result.as_ref().and_then(|r| r.left_gesture.as_ref()))
     } else {
         self.current_result.right_gesture.as_ref()
+            .or(self.last_valid_result.as_ref().and_then(|r| r.right_gesture.as_ref()))
     };
 
     ui.group(|ui| {
@@ -900,6 +925,7 @@ fn draw_tracking_overlay(&self, ui: &mut egui::Ui, rect: egui::Rect) {
     }
 }
 
+
     
     fn render_joint_panel(&mut self, ui: &mut egui::Ui) {
         // Implementation for joint tracking visualization
@@ -1110,6 +1136,11 @@ impl eframe::App for ArmTrackerApp {
                         match tracker.process_frame(&frame) {
                             Ok(tracking_result) => {
                                 self.current_result = tracking_result.clone();
+
+                                if tracking_result.left_gesture.is_some() || tracking_result.right_gesture.is_some() {
+                                    self.last_valid_result = Some(tracking_result.clone());
+                                }
+
                                 self.tracking_history.push(tracking_result);
                                 
                                 if self.tracking_history.len() > 1000 {
