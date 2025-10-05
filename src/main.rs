@@ -78,9 +78,9 @@ fn main() {
         ..Default::default()
     };
 
-    // Run the application (updated title)
+    // Run the application
     let result = eframe::run_native(
-        "Supro Arm Tracker",
+        "SuPro",
         options,
         Box::new(|cc| {
             // Configure fonts and visuals

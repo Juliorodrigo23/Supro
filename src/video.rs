@@ -6,9 +6,8 @@ use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
 use nokhwa::Camera;
 use std::sync::{Arc, Mutex};
-use std::process::{Command};
+use std::process::Command;
 use std::fs;
-use std::io::Write;
 
 pub enum VideoSource {
     Camera(Arc<Mutex<Camera>>),
@@ -24,12 +23,29 @@ pub struct VideoFileReader {
     fps: f32,
     frames_cache: Vec<DynamicImage>,
     is_loaded: bool,
+    loading_progress: f32,
+    loading_message: String,
 }
 
 impl VideoFileReader {
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
-        
+
+        // Check if file exists
+        if !path.exists() {
+            return Err(anyhow::anyhow!("Video file does not exist: {}", path.display()));
+        }
+
+        // Check if we have read permissions
+        if let Err(e) = std::fs::File::open(&path) {
+            return Err(anyhow::anyhow!("Cannot read video file (permission denied): {}", e));
+        }
+
+        // Check if ffprobe is available
+        if Command::new("ffprobe").arg("-version").output().is_err() {
+            return Err(anyhow::anyhow!("FFmpeg is not installed or not in PATH. Please install FFmpeg to process videos."));
+        }
+
         // Get video info using ffprobe
         let output = Command::new("ffprobe")
             .args(&[
@@ -41,26 +57,36 @@ impl VideoFileReader {
                 path.to_str().unwrap(),
             ])
             .output()
-            .context("Failed to run ffprobe. Is FFmpeg installed?")?;
+            .context("Failed to run ffprobe")?;
         
         let info = String::from_utf8_lossy(&output.stdout);
         let parts: Vec<&str> = info.trim().split(',').collect();
-        
+
         if parts.len() < 4 {
-            return Err(anyhow::anyhow!("Failed to parse video info"));
+            return Err(anyhow::anyhow!("Invalid video format or corrupted file"));
         }
-        
-        let width = parts[0].parse().unwrap_or(1280);
-        let height = parts[1].parse().unwrap_or(720);
+
+        let width = parts[0].parse()
+            .map_err(|_| anyhow::anyhow!("Invalid video width"))?;
+        let height = parts[1].parse()
+            .map_err(|_| anyhow::anyhow!("Invalid video height"))?;
         let fps_str = parts[2];
         let fps = if fps_str.contains('/') {
             let fps_parts: Vec<&str> = fps_str.split('/').collect();
+            if fps_parts.len() != 2 {
+                return Err(anyhow::anyhow!("Invalid frame rate format"));
+            }
             fps_parts[0].parse::<f32>().unwrap_or(30.0) / fps_parts[1].parse::<f32>().unwrap_or(1.0)
         } else {
             fps_str.parse().unwrap_or(30.0)
         };
-        let total_frames = parts[3].parse().unwrap_or(0);
-        
+        let total_frames: usize = parts[3].parse()
+            .map_err(|_| anyhow::anyhow!("Invalid frame count"))?;
+
+        if total_frames == 0 {
+            return Err(anyhow::anyhow!("Video has no frames"));
+        }
+
         Ok(Self {
             path,
             current_frame: 0,
@@ -70,20 +96,51 @@ impl VideoFileReader {
             fps,
             frames_cache: Vec::new(),
             is_loaded: false,
+            loading_progress: 0.0,
+            loading_message: String::from("Initializing..."),
         })
+    }
+
+    pub fn get_loading_progress(&self) -> f32 {
+        self.loading_progress
+    }
+
+    pub fn get_loading_message(&self) -> &str {
+        &self.loading_message
+    }
+
+    pub fn get_total_frames(&self) -> usize {
+        self.total_frames
     }
     
     pub fn load_all_frames(&mut self) -> Result<()> {
         if self.is_loaded {
             return Ok(());
         }
-        
+
         eprintln!("Loading video frames from: {}", self.path.display());
-        
-        // Extract frames using ffmpeg
-        let temp_dir = std::env::temp_dir().join(format!("arm_tracker_{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&temp_dir)?;
-        
+        self.loading_message = "Extracting frames...".to_string();
+        self.loading_progress = 0.0;
+
+        // Check if ffmpeg is available
+        if Command::new("ffmpeg").arg("-version").output().is_err() {
+            return Err(anyhow::anyhow!("FFmpeg is not installed. Please install FFmpeg to process videos."));
+        }
+
+        // Check available disk space
+        let temp_dir = std::env::temp_dir().join(format!("supro_{}", uuid::Uuid::new_v4()));
+
+        // Estimate required space (rough estimate: frames * 0.5MB per frame)
+        let estimated_space_mb = (self.total_frames as f64 * 0.5) as u64;
+        eprintln!("Estimated disk space needed: {} MB", estimated_space_mb);
+
+        if let Err(e) = fs::create_dir_all(&temp_dir) {
+            return Err(anyhow::anyhow!("Cannot create temporary directory: {}", e));
+        }
+
+        self.loading_progress = 0.1;
+        self.loading_message = format!("Extracting {} frames...", self.total_frames);
+
         // Extract frames as images
         let status = Command::new("ffmpeg")
             .args(&[
@@ -93,25 +150,43 @@ impl VideoFileReader {
             ])
             .status()
             .context("Failed to extract frames with ffmpeg")?;
-        
+
         if !status.success() {
-            return Err(anyhow::anyhow!("FFmpeg frame extraction failed"));
+            let _ = fs::remove_dir_all(&temp_dir);
+            return Err(anyhow::anyhow!("FFmpeg frame extraction failed. The video format may be unsupported."));
         }
-        
+
+        self.loading_progress = 0.5;
+        self.loading_message = "Loading frames into memory...".to_string();
+
         // Load extracted frames
         self.frames_cache.clear();
         for i in 1..=self.total_frames {
             let frame_path = temp_dir.join(format!("frame_{:04}.png", i));
             if frame_path.exists() {
-                let img = image::open(&frame_path)?;
-                self.frames_cache.push(img);
+                match image::open(&frame_path) {
+                    Ok(img) => {
+                        self.frames_cache.push(img);
+                        self.loading_progress = 0.5 + (0.5 * (i as f32 / self.total_frames as f32));
+                        self.loading_message = format!("Loading frame {}/{}", i, self.total_frames);
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to load frame {}: {}", i, e);
+                    }
+                }
             }
         }
-        
+
         // Clean up temp files
         let _ = fs::remove_dir_all(&temp_dir);
-        
+
+        if self.frames_cache.is_empty() {
+            return Err(anyhow::anyhow!("No frames could be loaded from the video"));
+        }
+
         self.is_loaded = true;
+        self.loading_progress = 1.0;
+        self.loading_message = format!("Loaded {} frames successfully", self.frames_cache.len());
         eprintln!("Loaded {} frames", self.frames_cache.len());
         Ok(())
     }

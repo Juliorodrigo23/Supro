@@ -3,9 +3,10 @@ use crate::tracking::{TrackingResult, GestureType};
 use csv::Writer;
 use std::path::{Path, PathBuf};
 use std::fs::File;
-use anyhow::{Result, Context};
-use chrono::{DateTime, Local};
+use anyhow::Result;
+use chrono::Local;
 use serde::Serialize;
+use nalgebra::Vector3;
 
 #[derive(Debug, Serialize)]
 struct TrackingRecord {
@@ -52,6 +53,23 @@ struct TrackingRecord {
     right_gesture: Option<String>,
     right_gesture_confidence: Option<f64>,
     right_gesture_angle: Option<f64>,
+
+    // Hand landmarks - Finger angles
+    // Left hand
+    left_thumb_angle: Option<f64>,
+    left_index_angle: Option<f64>,
+    left_middle_angle: Option<f64>,
+    left_ring_angle: Option<f64>,
+    left_pinky_angle: Option<f64>,
+    left_wrist_flexion: Option<f64>,
+
+    // Right hand
+    right_thumb_angle: Option<f64>,
+    right_index_angle: Option<f64>,
+    right_middle_angle: Option<f64>,
+    right_ring_angle: Option<f64>,
+    right_pinky_angle: Option<f64>,
+    right_wrist_flexion: Option<f64>,
 }
 
 pub struct DataExporter {
@@ -140,6 +158,18 @@ impl DataExporter {
             right_gesture: None,
             right_gesture_confidence: None,
             right_gesture_angle: None,
+            left_thumb_angle: None,
+            left_index_angle: None,
+            left_middle_angle: None,
+            left_ring_angle: None,
+            left_pinky_angle: None,
+            left_wrist_flexion: None,
+            right_thumb_angle: None,
+            right_index_angle: None,
+            right_middle_angle: None,
+            right_ring_angle: None,
+            right_pinky_angle: None,
+            right_wrist_flexion: None,
         };
         
         // Fill in joint data
@@ -197,8 +227,82 @@ impl DataExporter {
             record.right_gesture_confidence = Some(right_gesture.confidence);
             record.right_gesture_angle = Some(right_gesture.angle);
         }
-        
+
+        // Calculate finger angles for left hand
+        if let Some(left_hand) = result.hands.get("left") {
+            if left_hand.is_tracked && left_hand.landmarks.len() >= 21 {
+                record.left_thumb_angle = Some(Self::calculate_finger_angle(&left_hand.landmarks, 1, 2, 3, 4));
+                record.left_index_angle = Some(Self::calculate_finger_angle(&left_hand.landmarks, 5, 6, 7, 8));
+                record.left_middle_angle = Some(Self::calculate_finger_angle(&left_hand.landmarks, 9, 10, 11, 12));
+                record.left_ring_angle = Some(Self::calculate_finger_angle(&left_hand.landmarks, 13, 14, 15, 16));
+                record.left_pinky_angle = Some(Self::calculate_finger_angle(&left_hand.landmarks, 17, 18, 19, 20));
+                record.left_wrist_flexion = Some(Self::calculate_wrist_angle(&left_hand.landmarks));
+            }
+        }
+
+        // Calculate finger angles for right hand
+        if let Some(right_hand) = result.hands.get("right") {
+            if right_hand.is_tracked && right_hand.landmarks.len() >= 21 {
+                record.right_thumb_angle = Some(Self::calculate_finger_angle(&right_hand.landmarks, 1, 2, 3, 4));
+                record.right_index_angle = Some(Self::calculate_finger_angle(&right_hand.landmarks, 5, 6, 7, 8));
+                record.right_middle_angle = Some(Self::calculate_finger_angle(&right_hand.landmarks, 9, 10, 11, 12));
+                record.right_ring_angle = Some(Self::calculate_finger_angle(&right_hand.landmarks, 13, 14, 15, 16));
+                record.right_pinky_angle = Some(Self::calculate_finger_angle(&right_hand.landmarks, 17, 18, 19, 20));
+                record.right_wrist_flexion = Some(Self::calculate_wrist_angle(&right_hand.landmarks));
+            }
+        }
+
         record
+    }
+
+    // Calculate finger angle based on landmarks (MCP, PIP, DIP, TIP)
+    fn calculate_finger_angle(landmarks: &[Vector3<f64>], mcp: usize, pip: usize, dip: usize, tip: usize) -> f64 {
+        if landmarks.len() <= tip {
+            return 0.0;
+        }
+
+        // Calculate vectors
+        let v1 = landmarks[pip] - landmarks[mcp];
+        let v2 = landmarks[dip] - landmarks[pip];
+        let v3 = landmarks[tip] - landmarks[dip];
+
+        // Calculate angles between consecutive segments
+        let angle1 = Self::angle_between_vectors(&v1, &v2);
+        let angle2 = Self::angle_between_vectors(&v2, &v3);
+
+        // Return average angle (in degrees)
+        ((angle1 + angle2) / 2.0).to_degrees()
+    }
+
+    // Calculate wrist flexion angle
+    fn calculate_wrist_angle(landmarks: &[Vector3<f64>]) -> f64 {
+        if landmarks.len() < 21 {
+            return 0.0;
+        }
+
+        // Use wrist (0), middle finger MCP (9), and middle finger tip (12)
+        let wrist = landmarks[0];
+        let mcp = landmarks[9];
+        let tip = landmarks[12];
+
+        let v1 = mcp - wrist;
+        let v2 = tip - mcp;
+
+        Self::angle_between_vectors(&v1, &v2).to_degrees()
+    }
+
+    // Helper function to calculate angle between two vectors
+    fn angle_between_vectors(v1: &Vector3<f64>, v2: &Vector3<f64>) -> f64 {
+        let dot = v1.dot(v2);
+        let mag1 = v1.norm();
+        let mag2 = v2.norm();
+
+        if mag1 == 0.0 || mag2 == 0.0 {
+            return 0.0;
+        }
+
+        let cos_angle = (dot / (mag1 * mag2)).clamp(-1.0, 1.0);
+        cos_angle.acos()
     }
     
     pub fn generate_report(&self) -> Result<PathBuf> {

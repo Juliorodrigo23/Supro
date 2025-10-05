@@ -196,36 +196,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arm_tracker"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "cocoa 0.25.0",
- "csv",
- "directories",
- "eframe",
- "egui",
- "egui_extras",
- "image 0.24.9",
- "nalgebra",
- "nalgebra-glm",
- "nokhwa",
- "objc",
- "once_cell",
- "resvg",
- "rfd",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "usvg",
- "uuid",
-]
-
-[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3791,6 +3761,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6637bab7722d379c8b41ba849228d680cc12d0a45ba1fa2b48f2a30577a06731"
 dependencies = [
  "float-cmp",
+]
+
+[[package]]
+name = "supro"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "cocoa 0.25.0",
+ "csv",
+ "directories",
+ "eframe",
+ "egui",
+ "egui_extras",
+ "image 0.24.9",
+ "nalgebra",
+ "nalgebra-glm",
+ "nokhwa",
+ "objc",
+ "once_cell",
+ "resvg",
+ "rfd",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "usvg",
+ "uuid",
 ]
 
 [[package]]

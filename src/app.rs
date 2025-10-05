@@ -67,6 +67,8 @@ pub struct ArmTrackerApp {
     is_processing: bool,
     processing_complete: bool,
     processing_message: String,
+    current_video_frame: usize,
+    video_playback_speed: f32,
     
     // Gallery
     video_gallery: VideoGallery,
@@ -148,6 +150,8 @@ impl ArmTrackerApp {
             is_processing: false,
             processing_complete: false,
             processing_message: String::new(),
+            current_video_frame: 0,
+            video_playback_speed: 1.0,
             video_gallery: gallery,
             selected_gallery_video: None,
             ui_components: UIComponents::new(&cc.egui_ctx),
@@ -267,7 +271,8 @@ impl ArmTrackerApp {
                     self.is_playing = true;
                     self.is_processing = true;
                     self.processing_complete = false;
-                    self.processing_message = "Processing video...".to_string();
+                    self.processing_message = "Initializing video processing...".to_string();
+                    self.video_progress = 0.0;
                     
                     // Initialize MediaPipe for video processing
                     if let Ok(mut tracker) = self.tracker.lock() {
@@ -301,8 +306,18 @@ impl ArmTrackerApp {
                 Err(e) => {
                     eprintln!("Failed to open video file: {}", e);
                     self.processing_message = format!("Error: {}", e);
+                    self.is_processing = false;
+                    self.processing_complete = false;
                 }
             }
+        }
+    }
+
+    fn get_video_loading_info(&self) -> (f32, String) {
+        if let Some(VideoSource::File(reader)) = &self.video_source {
+            (reader.get_loading_progress(), reader.get_loading_message().to_string())
+        } else {
+            (0.0, String::new())
         }
     }
     
@@ -420,7 +435,7 @@ impl ArmTrackerApp {
                     }
                     
                     ui.vertical(|ui| {
-                        ui.heading("Supro Arm Tracker");
+                        ui.heading("SuPro");
                         ui.add_space(2.0);
                         ui.label(
                             egui::RichText::new("Arm Rotation Tracking System")
@@ -528,22 +543,12 @@ impl ArmTrackerApp {
                 });
                 self.render_video_panel(ui, self.show_overlay);
             });
-            
+
             // Right column - Gesture info only
             columns[1].vertical(|ui| {
                 ui.group(|ui| {
                     ui.heading("Gesture Detection");
                     self.render_gesture_panel(ui);
-                });
-                
-                ui.add_space(20.0);
-                
-                ui.group(|ui| {
-                    ui.heading("Arm Rotation");
-                    ui.add_space(10.0);
-                    self.render_arm_rotation_panel_dynamic(ui, "left");
-                    ui.add_space(10.0);
-                    self.render_arm_rotation_panel_dynamic(ui, "right");
                 });
             });
         });
@@ -629,13 +634,30 @@ impl ArmTrackerApp {
                 ui.add_space(10.0);
                 
                 if self.is_processing && !self.processing_complete {
+                    // Get loading info from video reader
+                    let (load_progress, load_message) = self.get_video_loading_info();
+
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label(&self.processing_message);
+                        if !load_message.is_empty() {
+                            ui.label(&load_message);
+                        } else {
+                            ui.label(&self.processing_message);
+                        }
                     });
-                    
+
                     ui.add_space(10.0);
-                    ui.add(egui::ProgressBar::new(self.video_progress));
+
+                    // Show loading progress if available, otherwise show processing progress
+                    let display_progress = if load_progress > 0.0 && load_progress < 1.0 {
+                        load_progress
+                    } else {
+                        self.video_progress
+                    };
+
+                    let progress_bar = egui::ProgressBar::new(display_progress)
+                        .show_percentage();
+                    ui.add(progress_bar);
                     
                     // Display the video being processed
                     match self.view_mode {
@@ -673,7 +695,19 @@ impl ArmTrackerApp {
                     ui.add_space(10.0);
                     ui.label(&self.processing_message);
                     ui.add_space(20.0);
-                    
+
+                    // Video playback controls
+                    self.render_video_playback_controls(ui);
+
+                    ui.add_space(20.0);
+
+                    if ui.button("⬅ Back to Gallery").clicked() {
+                        self.mode = AppMode::Gallery;
+                        self.selected_video = None;
+                        self.processing_complete = false;
+                        self.is_processing = false;
+                    }
+
                     if ui.button("📁 Process Another Video").clicked() {
                         self.selected_video = None;
                         self.processing_complete = false;
@@ -744,14 +778,36 @@ impl ArmTrackerApp {
     fn render_video_thumbnail(&mut self, ui: &mut egui::Ui, video: &VideoEntry) {
         ui.vertical(|ui| {
             ui.set_width(200.0);
-            
+
             ui.group(|ui| {
-                if video.thumbnail.is_some() {
-                    // Render actual thumbnail
-                    ui.allocate_space(egui::vec2(200.0, 150.0));
+                // Display thumbnail
+                let (rect, response) = ui.allocate_exact_size(egui::vec2(200.0, 150.0), egui::Sense::click());
+
+                if let Some(thumbnail) = &video.thumbnail {
+                    // Convert thumbnail to texture if needed
+                    let size = [thumbnail.width() as usize, thumbnail.height() as usize];
+                    let rgba = thumbnail.to_rgba8();
+                    let pixels = rgba.as_flat_samples();
+
+                    let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                        size,
+                        pixels.as_slice(),
+                    );
+
+                    let texture = ui.ctx().load_texture(
+                        format!("thumb_{}", video.name),
+                        color_image,
+                        Default::default(),
+                    );
+
+                    ui.painter().image(
+                        texture.id(),
+                        rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
                 } else {
                     // Placeholder
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(200.0, 150.0), egui::Sense::hover());
                     ui.painter().rect_filled(rect, egui::Rounding::same(4.0), egui::Color32::from_rgb(50, 50, 55));
                     ui.painter().text(
                         rect.center(),
@@ -760,6 +816,14 @@ impl ArmTrackerApp {
                         egui::FontId::proportional(40.0),
                         egui::Color32::WHITE,
                     );
+                }
+
+                if response.clicked() {
+                    self.selected_gallery_video = Some(video.clone());
+                    self.selected_video = Some(video.path.clone());
+                    // Switch to VideoFile mode to view the processed video
+                    self.mode = AppMode::VideoFile;
+                    self.load_selected_video();
                 }
                 
                 ui.label(&video.name);
@@ -777,13 +841,6 @@ impl ArmTrackerApp {
                         ui.colored_label(egui::Color32::GREEN, "✓ CSV");
                     }
                 });
-                
-                if ui.button("Open").clicked() {
-                    self.selected_gallery_video = Some(video.clone());
-                    self.selected_video = Some(video.path.clone());
-                    self.mode = AppMode::VideoFile;
-                    self.load_selected_video();
-                }
             });
         });
     }
@@ -1214,14 +1271,22 @@ impl ArmTrackerApp {
                         ui.label(self.settings.output_directory.display().to_string());
                         if ui.button("Browse...").clicked() {
                             if let Some(path) = FileDialog::new().pick_folder() {
-                                self.settings.output_directory = path;
+                                self.settings.output_directory = path.clone();
                                 let _ = std::fs::create_dir_all(&self.settings.output_directory);
+                                // Update gallery to scan from new directory
                                 self.video_gallery = VideoGallery::new(&self.settings.output_directory);
                                 let _ = self.video_gallery.scan_videos();
                             }
                         }
                     });
                 });
+
+                ui.add_space(10.0);
+
+                if ui.button("Save Settings").clicked() {
+                    // Settings are already applied immediately, just show confirmation
+                    ui.label("Settings saved!");
+                }
             });
     }
     
@@ -1232,7 +1297,7 @@ impl ArmTrackerApp {
             .default_size([420.0, 320.0])
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
-                    ui.heading("Supro Arm Tracker");
+                    ui.heading("SuPro");
                     ui.label("Version 1.0.0");
                     ui.add_space(12.0);
                     ui.label("A sophisticated motion tracking application");
@@ -1241,6 +1306,106 @@ impl ArmTrackerApp {
                     ui.hyperlink("https://github.com/Juliorodrigo23/Supro");
                 });
             });
+    }
+
+    fn render_video_playback_controls(&mut self, ui: &mut egui::Ui) {
+        ui.group(|ui| {
+            ui.heading("Video Playback");
+            ui.add_space(10.0);
+
+            // Get total frames if available
+            let total_frames = if let Some(VideoSource::File(reader)) = &self.video_source {
+                reader.get_total_frames()
+            } else {
+                0
+            };
+
+            if total_frames > 0 {
+                // Frame scrubber
+                ui.horizontal(|ui| {
+                    ui.label("Frame:");
+
+                    let mut frame_f32 = self.current_video_frame as f32;
+                    let slider = egui::Slider::new(&mut frame_f32, 0.0..=(total_frames - 1) as f32)
+                        .show_value(false);
+
+                    if ui.add(slider).changed() {
+                        self.current_video_frame = frame_f32 as usize;
+                        // Seek to the new frame
+                        if let Some(VideoSource::File(reader)) = &mut self.video_source {
+                            reader.seek(self.current_video_frame);
+                        }
+                    }
+
+                    ui.label(format!("{} / {}", self.current_video_frame + 1, total_frames));
+                });
+
+                ui.add_space(10.0);
+
+                // Playback controls
+                ui.horizontal(|ui| {
+                    // Previous frame
+                    if ui.button("⏮ Prev").clicked() && self.current_video_frame > 0 {
+                        self.current_video_frame -= 1;
+                        if let Some(VideoSource::File(reader)) = &mut self.video_source {
+                            reader.seek(self.current_video_frame);
+                        }
+                    }
+
+                    // Play/Pause
+                    let play_pause_text = if self.is_playing { "⏸ Pause" } else { "▶ Play" };
+                    if ui.button(play_pause_text).clicked() {
+                        self.is_playing = !self.is_playing;
+                    }
+
+                    // Next frame
+                    if ui.button("Next ⏭").clicked() && self.current_video_frame < total_frames - 1 {
+                        self.current_video_frame += 1;
+                        if let Some(VideoSource::File(reader)) = &mut self.video_source {
+                            reader.seek(self.current_video_frame);
+                        }
+                    }
+
+                    ui.separator();
+
+                    // Speed control
+                    ui.label("Speed:");
+                    ui.add(egui::Slider::new(&mut self.video_playback_speed, 0.25..=2.0)
+                        .text("x")
+                        .suffix("x"));
+                });
+
+                ui.add_space(5.0);
+
+                // Quick seek buttons
+                ui.horizontal(|ui| {
+                    ui.label("Quick Seek:");
+
+                    if ui.button("-10 frames").clicked() {
+                        self.current_video_frame = self.current_video_frame.saturating_sub(10);
+                        if let Some(VideoSource::File(reader)) = &mut self.video_source {
+                            reader.seek(self.current_video_frame);
+                        }
+                    }
+
+                    if ui.button("+10 frames").clicked() {
+                        self.current_video_frame = (self.current_video_frame + 10).min(total_frames - 1);
+                        if let Some(VideoSource::File(reader)) = &mut self.video_source {
+                            reader.seek(self.current_video_frame);
+                        }
+                    }
+
+                    if ui.button("Reset to Start").clicked() {
+                        self.current_video_frame = 0;
+                        if let Some(VideoSource::File(reader)) = &mut self.video_source {
+                            reader.seek(0);
+                        }
+                    }
+                });
+            } else {
+                ui.label("No video loaded");
+            }
+        });
     }
 }
 
