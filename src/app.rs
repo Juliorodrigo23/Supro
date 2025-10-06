@@ -9,6 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
 use chrono::{DateTime, Local};
 use rfd::FileDialog;
+use image::{DynamicImage, Rgba, RgbaImage};
+use imageproc::drawing::{draw_line_segment_mut, draw_filled_circle_mut, draw_hollow_circle_mut};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AppMode {
@@ -39,7 +41,7 @@ pub struct ArmTrackerApp {
     recorder: Option<VideoRecorder>,
     data_exporter: Option<DataExporter>,
     mediapipe_status: MediaPipeStatus,
-    
+
     // UI State
     mode: AppMode,
     view_mode: ViewMode,
@@ -48,18 +50,18 @@ pub struct ArmTrackerApp {
     show_about: bool,
     show_save_message: bool,
     save_message_timer: f32,
-    
+
     // Recording state
     is_recording: bool,
     recording_start: Option<DateTime<Local>>,
     recording_duration: std::time::Duration,
-    
+
     // Tracking data
     current_result: TrackingResult,
     tracking_history: Vec<TrackingResult>,
     last_valid_result: Option<TrackingResult>,
     show_overlay: bool,
-    
+
     // Video processing
     selected_video: Option<PathBuf>,
     video_progress: f32,
@@ -69,23 +71,26 @@ pub struct ArmTrackerApp {
     processing_message: String,
     current_video_frame: usize,
     video_playback_speed: f32,
-    
+    is_playback_mode: bool,
+    video_aspect_ratio: Option<f32>,
+    overlay_video_source: Option<VideoSource>,
+
     // Gallery
     video_gallery: VideoGallery,
     selected_gallery_video: Option<VideoEntry>,
-    
+
     // UI Components
     ui_components: UIComponents,
-    
+
     // Settings - Simplified to just directories
     settings: AppSettings,
-    
+
     current_frame_texture: Option<egui::TextureHandle>,
     overlay_frame_texture: Option<egui::TextureHandle>,
-    
+
     // Time tracking for frame processing
     sim_time: f64,
-    
+
     #[cfg(target_os = "macos")]
     pub(crate) macos_icon_set: bool,
 }
@@ -152,6 +157,9 @@ impl ArmTrackerApp {
             processing_message: String::new(),
             current_video_frame: 0,
             video_playback_speed: 1.0,
+            is_playback_mode: false,
+            video_aspect_ratio: None,
+            overlay_video_source: None,
             video_gallery: gallery,
             selected_gallery_video: None,
             ui_components: UIComponents::new(&cc.egui_ctx),
@@ -224,15 +232,19 @@ impl ArmTrackerApp {
             }
             return;
         }
-        
+
         match VideoSource::new_camera(0) {
             Ok(mut src) => {
                 match src.read_frame() {
                     Ok(frame) => {
                         eprintln!("Camera started: {}x{}", frame.width(), frame.height());
+
+                        // Store the camera aspect ratio
+                        self.video_aspect_ratio = src.get_aspect_ratio();
+
                         self.video_source = Some(src);
                         self.mediapipe_status = MediaPipeStatus::Initializing;
-                        
+
                         let tracker = Arc::clone(&self.tracker);
                         std::thread::spawn(move || {
                             std::thread::sleep(std::time::Duration::from_millis(500));
@@ -267,22 +279,27 @@ impl ArmTrackerApp {
         if let Some(path) = &self.selected_video {
             match VideoSource::new_file(path) {
                 Ok(source) => {
+                    // Store the aspect ratio
+                    self.video_aspect_ratio = source.get_aspect_ratio();
+
                     self.video_source = Some(source);
+                    self.overlay_video_source = None;
                     self.is_playing = true;
                     self.is_processing = true;
                     self.processing_complete = false;
+                    self.is_playback_mode = false;
                     self.processing_message = "Initializing video processing...".to_string();
                     self.video_progress = 0.0;
-                    
+
                     // Initialize MediaPipe for video processing
                     if let Ok(mut tracker) = self.tracker.lock() {
                         tracker.initialize_mediapipe();
                     }
-                    
-                    // Initialize recorder for saving processed video
+
+                    // Initialize recorder for saving processed video to gallery folder
                     if let Some(info) = self.video_source.as_ref().and_then(|s| s.get_info()) {
                         match VideoRecorder::new(
-                            &self.settings.working_directory,
+                            &self.settings.output_directory, // Save to gallery folder instead of working directory
                             info.width as u32,
                             info.height as u32,
                             info.fps,
@@ -290,7 +307,7 @@ impl ArmTrackerApp {
                             Ok(recorder) => {
                                 let output_dir = recorder.get_output_dir().to_path_buf();
                                 self.recorder = Some(recorder);
-                                
+
                                 // Initialize data exporter
                                 self.data_exporter = Some(DataExporter::new(
                                     output_dir,
@@ -313,6 +330,47 @@ impl ArmTrackerApp {
         }
     }
 
+    fn load_processed_video_for_playback(&mut self) {
+        if let Some(video_entry) = &self.selected_gallery_video {
+            // Load raw video
+            let raw_path = &video_entry.path;
+            match VideoSource::new_file(raw_path) {
+                Ok(source) => {
+                    self.video_aspect_ratio = source.get_aspect_ratio();
+                    self.video_source = Some(source);
+
+                    // Load overlay video if it exists
+                    let overlay_path = raw_path.parent()
+                        .map(|p| p.join("overlay_video.mp4"));
+
+                    if let Some(overlay_path) = overlay_path {
+                        if overlay_path.exists() {
+                            match VideoSource::new_file(&overlay_path) {
+                                Ok(overlay_source) => {
+                                    self.overlay_video_source = Some(overlay_source);
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to load overlay video: {}", e);
+                                }
+                            }
+                        }
+                    }
+
+                    // Set playback mode
+                    self.is_playback_mode = true;
+                    self.is_playing = false;
+                    self.is_processing = false;
+                    self.processing_complete = true;
+                    self.current_video_frame = 0;
+                    self.video_progress = 0.0;
+                }
+                Err(e) => {
+                    eprintln!("Failed to load video for playback: {}", e);
+                }
+            }
+        }
+    }
+
     fn get_video_loading_info(&self) -> (f32, String) {
         if let Some(VideoSource::File(reader)) = &self.video_source {
             (reader.get_loading_progress(), reader.get_loading_message().to_string())
@@ -323,8 +381,8 @@ impl ArmTrackerApp {
     
     fn save_processed_video(&mut self) {
         if let Some(recorder) = self.recorder.take() {
-            self.processing_message = "Saving videos...".to_string();
-            
+            self.processing_message = "Saving videos to gallery...".to_string();
+
             match recorder.save_videos() {
                 Ok((raw_path, overlay_path)) => {
                     // Save CSV data
@@ -332,16 +390,24 @@ impl ArmTrackerApp {
                         match exporter.export_csv() {
                             Ok(csv_path) => {
                                 self.processing_message = format!(
-                                    "Saved:\n- Raw: {}\n- Overlay: {}\n- CSV: {}",
+                                    "Saved to gallery:\n- Raw: {}\n- Overlay: {}\n- CSV: {}",
                                     raw_path.display(),
                                     overlay_path.display(),
                                     csv_path.display()
                                 );
                                 self.show_save_message = true;
                                 self.save_message_timer = 5.0;
-                                
-                                // Refresh gallery
+
+                                // Refresh gallery to show the newly saved video
                                 let _ = self.video_gallery.scan_videos();
+
+                                // Load the processed video for playback
+                                if let Some(entry) = self.video_gallery.get_videos().iter()
+                                    .find(|v| v.path == raw_path) {
+                                    self.selected_gallery_video = Some(entry.clone());
+                                    self.selected_video = Some(raw_path.clone());
+                                    self.load_processed_video_for_playback();
+                                }
                             }
                             Err(e) => {
                                 self.processing_message = format!("CSV save error: {}", e);
@@ -353,7 +419,7 @@ impl ArmTrackerApp {
                     self.processing_message = format!("Video save error: {}", e);
                 }
             }
-            
+
             self.processing_complete = true;
         }
     }
@@ -468,9 +534,9 @@ impl ArmTrackerApp {
                 });
                 
                 ui.separator();
-                
-                // View mode buttons (only for Live and VideoFile modes)
-                if self.mode != AppMode::Gallery {
+
+                // View mode buttons (only for Live mode)
+                if self.mode == AppMode::Live {
                     ui.horizontal(|ui| {
                         if ui.selectable_label(self.view_mode == ViewMode::SingleCamera, "Single View").clicked() {
                             self.view_mode = ViewMode::SingleCamera;
@@ -479,8 +545,9 @@ impl ArmTrackerApp {
                             self.view_mode = ViewMode::DualView;
                         }
                     });
+                    ui.separator();
                 }
-                
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("⚙ Settings").clicked() {
                         self.show_settings = !self.show_settings;
@@ -559,10 +626,10 @@ impl ArmTrackerApp {
         ui.horizontal(|ui| {
             let avail_w = ui.available_width();
             let panel_w = (avail_w - 20.0) / 2.0;
-            
-            let aspect = 16.0 / 9.0;
+
+            let aspect = self.video_aspect_ratio.unwrap_or(16.0 / 9.0);
             let video_display_h = (panel_w / aspect).clamp(180.0, 360.0);
-            
+
             // Left panel - Raw Feed
             ui.vertical(|ui| {
                 ui.set_width(panel_w);
@@ -572,9 +639,9 @@ impl ArmTrackerApp {
                     self.render_video_panel_sized(ui, panel_w - 20.0, video_display_h, false);
                 });
             });
-            
+
             ui.add_space(20.0);
-            
+
             // Right panel - Tracking Overlay
             ui.vertical(|ui| {
                 ui.set_width(panel_w);
@@ -603,50 +670,53 @@ impl ArmTrackerApp {
     }
     
     fn render_video_file_mode(&mut self, ui: &mut egui::Ui) {
-        ui.vertical_centered(|ui| {
-            ui.add_space(20.0);
-            ui.heading("Video Upload & Processing");
-            ui.add_space(20.0);
-            
-            if self.selected_video.is_none() {
+        if self.selected_video.is_none() {
+            ui.vertical_centered(|ui| {
+                ui.add_space(20.0);
+                ui.heading("Video Upload & Processing");
+                ui.add_space(20.0);
+
                 ui.group(|ui| {
                     ui.add_space(40.0);
                     ui.label("Upload a video to process with MediaPipe tracking");
                     ui.add_space(20.0);
-                    
+
                     let button = egui::Button::new(
                         egui::RichText::new("📁 Select Video File")
                             .size(20.0)
                             .color(egui::Color32::WHITE)
                     )
                     .fill(egui::Color32::from_rgb(33, 150, 243));
-                    
+
                     if ui.add_sized([200.0, 50.0], button).clicked() {
                         self.open_video_file();
                     }
-                    
+
                     ui.add_space(20.0);
                     ui.label("Supported formats: MP4, AVI, MOV, MKV");
                     ui.add_space(40.0);
                 });
-            } else if let Some(path) = &self.selected_video {
-                ui.label(format!("Processing: {}", path.file_name().unwrap().to_string_lossy()));
+            });
+        } else if self.is_playback_mode {
+            // Playback mode - show dual view with controls
+            self.render_video_playback_ui(ui);
+        } else if self.selected_video.is_some() {
+            let video_name = self.selected_video.as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("Unknown")
+                .to_string();
+
+            ui.vertical_centered(|ui| {
+                ui.add_space(20.0);
+                ui.heading("Video Upload & Processing");
+                ui.add_space(20.0);
+                ui.label(format!("Processing: {}", video_name));
                 ui.add_space(10.0);
-                
+
                 if self.is_processing && !self.processing_complete {
                     // Get loading info from video reader
                     let (load_progress, load_message) = self.get_video_loading_info();
-
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        if !load_message.is_empty() {
-                            ui.label(&load_message);
-                        } else {
-                            ui.label(&self.processing_message);
-                        }
-                    });
-
-                    ui.add_space(10.0);
 
                     // Show loading progress if available, otherwise show processing progress
                     let display_progress = if load_progress > 0.0 && load_progress < 1.0 {
@@ -655,10 +725,61 @@ impl ArmTrackerApp {
                         self.video_progress
                     };
 
-                    let progress_bar = egui::ProgressBar::new(display_progress)
-                        .show_percentage();
-                    ui.add(progress_bar);
-                    
+                    // Get total frames for display
+                    let total_frames = if let Some(VideoSource::File(reader)) = &self.video_source {
+                        reader.get_total_frames()
+                    } else {
+                        0
+                    };
+
+                    let current_frame = (display_progress * total_frames as f32) as usize;
+
+                    ui.group(|ui| {
+                        ui.add_space(20.0);
+
+                        // Spinner and status
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Spinner::new().size(24.0));
+                            ui.add_space(10.0);
+                            if !load_message.is_empty() {
+                                ui.label(
+                                    egui::RichText::new(&load_message)
+                                        .size(16.0)
+                                        .color(egui::Color32::from_rgb(100, 150, 255))
+                                );
+                            } else {
+                                ui.label(
+                                    egui::RichText::new(&self.processing_message)
+                                        .size(16.0)
+                                        .color(egui::Color32::from_rgb(100, 150, 255))
+                                );
+                            }
+                        });
+
+                        ui.add_space(15.0);
+
+                        // Progress bar
+                        let progress_bar = egui::ProgressBar::new(display_progress)
+                            .show_percentage()
+                            .animate(true);
+                        ui.add_sized([ui.available_width() * 0.8, 25.0], progress_bar);
+
+                        ui.add_space(10.0);
+
+                        // Frame count
+                        if total_frames > 0 {
+                            ui.label(
+                                egui::RichText::new(format!("Processing frame {}/{}", current_frame.min(total_frames), total_frames))
+                                    .size(14.0)
+                                    .color(egui::Color32::LIGHT_GRAY)
+                            );
+                        }
+
+                        ui.add_space(20.0);
+                    });
+
+                    ui.add_space(20.0);
+
                     // Display the video being processed
                     match self.view_mode {
                         ViewMode::SingleCamera => {
@@ -671,7 +792,7 @@ impl ArmTrackerApp {
                             ui.horizontal(|ui| {
                                 let avail_w = ui.available_width();
                                 let panel_w = (avail_w - 20.0) / 2.0;
-                                
+
                                 ui.vertical(|ui| {
                                     ui.set_width(panel_w);
                                     ui.group(|ui| {
@@ -679,7 +800,7 @@ impl ArmTrackerApp {
                                         self.render_video_panel(ui, false);
                                     });
                                 });
-                                
+
                                 ui.vertical(|ui| {
                                     ui.set_width(panel_w);
                                     ui.group(|ui| {
@@ -691,32 +812,13 @@ impl ArmTrackerApp {
                         }
                     }
                 } else if self.processing_complete {
-                    ui.colored_label(egui::Color32::from_rgb(76, 175, 80), "✓ Processing Complete!");
-                    ui.add_space(10.0);
-                    ui.label(&self.processing_message);
-                    ui.add_space(20.0);
-
-                    // Video playback controls
-                    self.render_video_playback_controls(ui);
-
-                    ui.add_space(20.0);
-
-                    if ui.button("⬅ Back to Gallery").clicked() {
-                        self.mode = AppMode::Gallery;
-                        self.selected_video = None;
-                        self.processing_complete = false;
-                        self.is_processing = false;
-                    }
-
-                    if ui.button("📁 Process Another Video").clicked() {
-                        self.selected_video = None;
-                        self.processing_complete = false;
-                        self.is_processing = false;
-                    }
+                    // After processing is complete, switch to playback mode
+                    self.is_playback_mode = true;
+                    self.render_video_playback_ui(ui);
                 }
-                
+
                 ui.add_space(20.0);
-                
+
                 ui.horizontal(|ui| {
                     if !self.processing_complete {
                         if ui.button("Cancel").clicked() {
@@ -726,6 +828,75 @@ impl ArmTrackerApp {
                         }
                     }
                 });
+            });
+        }
+    }
+
+    fn render_video_playback_ui(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(10.0);
+
+        // Top row: two video panels side-by-side
+        ui.horizontal(|ui| {
+            let avail_w = ui.available_width();
+            let panel_w = (avail_w - 20.0) / 2.0;
+
+            let aspect = self.video_aspect_ratio.unwrap_or(16.0 / 9.0);
+            let video_display_h = (panel_w / aspect).clamp(200.0, 500.0);
+
+            // Left panel - Raw Feed
+            ui.vertical(|ui| {
+                ui.set_width(panel_w);
+                ui.group(|ui| {
+                    ui.heading("Raw Video");
+                    ui.add_space(6.0);
+                    self.render_video_panel_sized(ui, panel_w - 20.0, video_display_h, false);
+                });
+            });
+
+            ui.add_space(20.0);
+
+            // Right panel - Tracking Overlay
+            ui.vertical(|ui| {
+                ui.set_width(panel_w);
+                ui.group(|ui| {
+                    ui.heading("With Tracking Overlay");
+                    ui.add_space(6.0);
+                    self.render_video_panel_with_overlay_sized(ui, panel_w - 20.0, video_display_h);
+                });
+            });
+        });
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(10.0);
+
+        // Bottom: playback controls
+        self.render_video_playback_controls(ui);
+
+        ui.add_space(20.0);
+
+        // Navigation buttons
+        ui.horizontal(|ui| {
+            if ui.button("⬅ Back to Gallery").clicked() {
+                self.mode = AppMode::Gallery;
+                self.selected_video = None;
+                self.selected_gallery_video = None;
+                self.processing_complete = false;
+                self.is_processing = false;
+                self.is_playback_mode = false;
+                self.video_source = None;
+                self.overlay_video_source = None;
+            }
+
+            if !self.is_playback_mode {
+                if ui.button("📁 Process Another Video").clicked() {
+                    self.selected_video = None;
+                    self.processing_complete = false;
+                    self.is_processing = false;
+                    self.is_playback_mode = false;
+                    self.video_source = None;
+                    self.overlay_video_source = None;
+                }
             }
         });
     }
@@ -823,7 +994,7 @@ impl ArmTrackerApp {
                     self.selected_video = Some(video.path.clone());
                     // Switch to VideoFile mode to view the processed video
                     self.mode = AppMode::VideoFile;
-                    self.load_selected_video();
+                    self.load_processed_video_for_playback();
                 }
                 
                 ui.label(&video.name);
@@ -847,14 +1018,14 @@ impl ArmTrackerApp {
     
     fn render_video_panel(&mut self, ui: &mut egui::Ui, with_overlay: bool) {
         let max_w = ui.available_width();
-        let aspect = 16.0 / 9.0;
+        let aspect = self.video_aspect_ratio.unwrap_or(16.0 / 9.0);
         let display_w = (max_w - 20.0).max(240.0);
         let display_h = (display_w / aspect).clamp(160.0, 420.0);
-        
+
         let (rect, _resp) = ui.allocate_exact_size(egui::vec2(display_w, display_h), egui::Sense::hover());
-        
+
         ui.painter().rect_filled(rect, egui::Rounding::same(8.0), egui::Color32::from_rgb(28, 28, 34));
-        
+
         if let Some(texture_id) = self.get_current_frame_texture() {
             ui.painter().image(
                 texture_id,
@@ -862,7 +1033,7 @@ impl ArmTrackerApp {
                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                 egui::Color32::WHITE,
             );
-            
+
             if with_overlay && !self.current_result.tracking_lost {
                 self.draw_tracking_overlay(ui, rect);
             }
@@ -880,9 +1051,9 @@ impl ArmTrackerApp {
     
     fn render_video_panel_sized(&mut self, ui: &mut egui::Ui, width: f32, height: f32, with_overlay: bool) {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
-        
+
         ui.painter().rect_filled(rect, egui::Rounding::same(8.0), egui::Color32::from_rgb(28, 28, 34));
-        
+
         if let Some(texture_id) = self.get_current_frame_texture() {
             ui.painter().image(
                 texture_id,
@@ -890,7 +1061,7 @@ impl ArmTrackerApp {
                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                 egui::Color32::WHITE,
             );
-            
+
             if with_overlay && !self.current_result.tracking_lost {
                 self.draw_tracking_overlay(ui, rect);
             }
@@ -899,6 +1070,42 @@ impl ArmTrackerApp {
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 "No video feed",
+                egui::FontId::proportional(16.0),
+                egui::Color32::from_gray(180),
+            );
+        }
+    }
+
+    fn render_video_panel_with_overlay_sized(&mut self, ui: &mut egui::Ui, width: f32, height: f32) {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+
+        ui.painter().rect_filled(rect, egui::Rounding::same(8.0), egui::Color32::from_rgb(28, 28, 34));
+
+        // Try to use overlay video source if available
+        if let Some(texture) = &self.overlay_frame_texture {
+            ui.painter().image(
+                texture.id(),
+                rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        } else if let Some(texture_id) = self.get_current_frame_texture() {
+            // Fallback to regular frame with overlay drawn on top
+            ui.painter().image(
+                texture_id,
+                rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+
+            if !self.current_result.tracking_lost {
+                self.draw_tracking_overlay(ui, rect);
+            }
+        } else {
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "No overlay available",
                 egui::FontId::proportional(16.0),
                 egui::Color32::from_gray(180),
             );
@@ -1240,6 +1447,122 @@ impl ArmTrackerApp {
     fn get_current_frame_texture(&self) -> Option<egui::TextureId> {
         self.current_frame_texture.as_ref().map(|t| t.id())
     }
+
+    fn draw_overlay_on_image(&self, image: &DynamicImage, tracking_result: &TrackingResult) -> DynamicImage {
+        let mut img = image.to_rgba8();
+        let width = img.width() as f32;
+        let height = img.height() as f32;
+
+        // Draw skeleton connections with thicker lines for higher quality
+        let connections = vec![
+            ("left_shoulder", "left_elbow"),
+            ("left_elbow", "left_wrist"),
+            ("right_shoulder", "right_elbow"),
+            ("right_elbow", "right_wrist"),
+            ("left_shoulder", "right_shoulder"),
+        ];
+
+        for (from, to) in connections {
+            if let (Some(from_joint), Some(to_joint)) = (
+                tracking_result.joints.get(from),
+                tracking_result.joints.get(to),
+            ) {
+                let from_x = (from_joint.position.x as f32 * width) as i32;
+                let from_y = (from_joint.position.y as f32 * height) as i32;
+                let to_x = (to_joint.position.x as f32 * width) as i32;
+                let to_y = (to_joint.position.y as f32 * height) as i32;
+
+                // Draw thick line (5 pixels wide for better visibility)
+                let green = Rgba([0u8, 255u8, 0u8, 255u8]);
+                for offset in -2..=2 {
+                    draw_line_segment_mut(
+                        &mut img,
+                        (from_x as f32 + offset as f32, from_y as f32),
+                        (to_x as f32 + offset as f32, to_y as f32),
+                        green,
+                    );
+                    draw_line_segment_mut(
+                        &mut img,
+                        (from_x as f32, from_y as f32 + offset as f32),
+                        (to_x as f32, to_y as f32 + offset as f32),
+                        green,
+                    );
+                }
+            }
+        }
+
+        // Draw joints with larger circles for better visibility
+        for (name, joint) in &tracking_result.joints {
+            let x = (joint.position.x as f32 * width) as i32;
+            let y = (joint.position.y as f32 * height) as i32;
+
+            let color = if name.contains("left") {
+                Rgba([255u8, 0u8, 0u8, 255u8])
+            } else {
+                Rgba([0u8, 0u8, 255u8, 255u8])
+            };
+
+            draw_filled_circle_mut(&mut img, (x, y), 12, color);
+            draw_hollow_circle_mut(&mut img, (x, y), 14, Rgba([255u8, 255u8, 255u8, 255u8]));
+        }
+
+        // Draw hand landmarks and connections
+        for (side, hand) in &tracking_result.hands {
+            if !hand.is_tracked {
+                continue;
+            }
+
+            let hand_color = if side == "left" {
+                Rgba([255u8, 100u8, 100u8, 255u8])
+            } else {
+                Rgba([100u8, 100u8, 255u8, 255u8])
+            };
+
+            // Draw hand landmarks
+            for (i, landmark) in hand.landmarks.iter().enumerate() {
+                let x = (landmark.x as f32 * width) as i32;
+                let y = (landmark.y as f32 * height) as i32;
+
+                let radius = if i == 0 { 8 } else { 5 };
+                draw_filled_circle_mut(&mut img, (x, y), radius, hand_color);
+            }
+
+            // Draw connections between finger joints
+            let finger_connections = [
+                // Thumb
+                (0, 1), (1, 2), (2, 3), (3, 4),
+                // Index
+                (0, 5), (5, 6), (6, 7), (7, 8),
+                // Middle
+                (0, 9), (9, 10), (10, 11), (11, 12),
+                // Ring
+                (0, 13), (13, 14), (14, 15), (15, 16),
+                // Pinky
+                (0, 17), (17, 18), (18, 19), (19, 20),
+            ];
+
+            for (from, to) in finger_connections.iter() {
+                if *from < hand.landmarks.len() && *to < hand.landmarks.len() {
+                    let from_x = (hand.landmarks[*from].x as f32 * width) as i32;
+                    let from_y = (hand.landmarks[*from].y as f32 * height) as i32;
+                    let to_x = (hand.landmarks[*to].x as f32 * width) as i32;
+                    let to_y = (hand.landmarks[*to].y as f32 * height) as i32;
+
+                    // Draw thicker lines for fingers
+                    for offset in -1..=1 {
+                        draw_line_segment_mut(
+                            &mut img,
+                            (from_x as f32 + offset as f32, from_y as f32),
+                            (to_x as f32 + offset as f32, to_y as f32),
+                            hand_color,
+                        );
+                    }
+                }
+            }
+        }
+
+        DynamicImage::ImageRgba8(img)
+    }
     
     fn render_settings_window(&mut self, ctx: &egui::Context) {
         egui::Window::new("Settings")
@@ -1331,10 +1654,7 @@ impl ArmTrackerApp {
 
                     if ui.add(slider).changed() {
                         self.current_video_frame = frame_f32 as usize;
-                        // Seek to the new frame
-                        if let Some(VideoSource::File(reader)) = &mut self.video_source {
-                            reader.seek(self.current_video_frame);
-                        }
+                        self.is_playing = false; // Pause when scrubbing
                     }
 
                     ui.label(format!("{} / {}", self.current_video_frame + 1, total_frames));
@@ -1347,9 +1667,7 @@ impl ArmTrackerApp {
                     // Previous frame
                     if ui.button("⏮ Prev").clicked() && self.current_video_frame > 0 {
                         self.current_video_frame -= 1;
-                        if let Some(VideoSource::File(reader)) = &mut self.video_source {
-                            reader.seek(self.current_video_frame);
-                        }
+                        self.is_playing = false;
                     }
 
                     // Play/Pause
@@ -1361,9 +1679,7 @@ impl ArmTrackerApp {
                     // Next frame
                     if ui.button("Next ⏭").clicked() && self.current_video_frame < total_frames - 1 {
                         self.current_video_frame += 1;
-                        if let Some(VideoSource::File(reader)) = &mut self.video_source {
-                            reader.seek(self.current_video_frame);
-                        }
+                        self.is_playing = false;
                     }
 
                     ui.separator();
@@ -1383,23 +1699,17 @@ impl ArmTrackerApp {
 
                     if ui.button("-10 frames").clicked() {
                         self.current_video_frame = self.current_video_frame.saturating_sub(10);
-                        if let Some(VideoSource::File(reader)) = &mut self.video_source {
-                            reader.seek(self.current_video_frame);
-                        }
+                        self.is_playing = false;
                     }
 
                     if ui.button("+10 frames").clicked() {
                         self.current_video_frame = (self.current_video_frame + 10).min(total_frames - 1);
-                        if let Some(VideoSource::File(reader)) = &mut self.video_source {
-                            reader.seek(self.current_video_frame);
-                        }
+                        self.is_playing = false;
                     }
 
                     if ui.button("Reset to Start").clicked() {
                         self.current_video_frame = 0;
-                        if let Some(VideoSource::File(reader)) = &mut self.video_source {
-                            reader.seek(0);
-                        }
+                        self.is_playing = false;
                     }
                 });
             } else {
@@ -1439,41 +1749,162 @@ impl eframe::App for ArmTrackerApp {
         }
         
         // Process video frames
-        if let Some(video_source) = self.video_source.as_mut() {
+        if self.is_playback_mode {
+            // Playback mode - read from both raw and overlay sources
+            if self.is_playing {
+                // Get total frames to check bounds
+                let total_frames = if let Some(VideoSource::File(reader)) = &self.video_source {
+                    reader.get_total_frames()
+                } else {
+                    0
+                };
+
+                // Check if we've reached the end
+                if self.current_video_frame >= total_frames.saturating_sub(1) {
+                    self.is_playing = false;
+                    self.current_video_frame = total_frames.saturating_sub(1);
+                } else {
+                    // Read raw video frame
+                    if let Some(video_source) = self.video_source.as_mut() {
+                        if let Ok(frame) = video_source.read_frame() {
+                            let size = [frame.width() as usize, frame.height() as usize];
+                            let rgba = frame.to_rgba8();
+                            let pixels = rgba.as_flat_samples();
+
+                            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                                size,
+                                pixels.as_slice(),
+                            );
+
+                            if let Some(texture) = &mut self.current_frame_texture {
+                                texture.set(color_image, Default::default());
+                            } else {
+                                self.current_frame_texture = Some(ctx.load_texture(
+                                    "video_frame",
+                                    color_image,
+                                    Default::default(),
+                                ));
+                            }
+                        }
+                    }
+
+                    // Read overlay video frame
+                    if let Some(overlay_source) = self.overlay_video_source.as_mut() {
+                        if let Ok(overlay_frame) = overlay_source.read_frame() {
+                            let size = [overlay_frame.width() as usize, overlay_frame.height() as usize];
+                            let rgba = overlay_frame.to_rgba8();
+                            let pixels = rgba.as_flat_samples();
+
+                            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                                size,
+                                pixels.as_slice(),
+                            );
+
+                            if let Some(texture) = &mut self.overlay_frame_texture {
+                                texture.set(color_image, Default::default());
+                            } else {
+                                self.overlay_frame_texture = Some(ctx.load_texture(
+                                    "overlay_frame",
+                                    color_image,
+                                    Default::default(),
+                                ));
+                            }
+                        }
+                    }
+
+                    self.current_video_frame += 1;
+                }
+            } else {
+                // When paused or scrubbing, load the current frame
+                if let Some(VideoSource::File(reader)) = &mut self.video_source {
+                    if let Some(frame) = reader.get_frame(self.current_video_frame) {
+                        let size = [frame.width() as usize, frame.height() as usize];
+                        let rgba = frame.to_rgba8();
+                        let pixels = rgba.as_flat_samples();
+
+                        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                            size,
+                            pixels.as_slice(),
+                        );
+
+                        if let Some(texture) = &mut self.current_frame_texture {
+                            texture.set(color_image, Default::default());
+                        } else {
+                            self.current_frame_texture = Some(ctx.load_texture(
+                                "video_frame",
+                                color_image,
+                                Default::default(),
+                            ));
+                        }
+                    }
+                }
+
+                if let Some(VideoSource::File(reader)) = &mut self.overlay_video_source {
+                    if let Some(overlay_frame) = reader.get_frame(self.current_video_frame) {
+                        let size = [overlay_frame.width() as usize, overlay_frame.height() as usize];
+                        let rgba = overlay_frame.to_rgba8();
+                        let pixels = rgba.as_flat_samples();
+
+                        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                            size,
+                            pixels.as_slice(),
+                        );
+
+                        if let Some(texture) = &mut self.overlay_frame_texture {
+                            texture.set(color_image, Default::default());
+                        } else {
+                            self.overlay_frame_texture = Some(ctx.load_texture(
+                                "overlay_frame",
+                                color_image,
+                                Default::default(),
+                            ));
+                        }
+                    }
+                }
+            }
+        } else if let Some(video_source) = self.video_source.as_mut() {
+            // Normal processing mode
             match video_source.read_frame() {
                 Ok(frame) => {
                     // Create overlay frame with tracking
                     let overlay_frame = frame.clone();
-                    
+
                     // Process with tracker
                     if let Ok(mut tracker) = self.tracker.lock() {
                         match tracker.process_frame(&frame) {
                             Ok(tracking_result) => {
                                 self.current_result = tracking_result.clone();
-                                
+
                                 if tracking_result.left_gesture.is_some() || tracking_result.right_gesture.is_some() {
                                     self.last_valid_result = Some(tracking_result.clone());
                                 }
-                                
+
                                 self.tracking_history.push(tracking_result.clone());
-                                
+
                                 if self.tracking_history.len() > 1000 {
                                     self.tracking_history.remove(0);
                                 }
-                                
+
                                 // Update progress for video files
                                 if self.mode == AppMode::VideoFile {
                                     self.video_progress = video_source.get_progress();
                                 }
-                                
-                                // Add to data exporter if recording
-                                if self.is_recording {
+
+                                // Add to data exporter and recorder
+                                if self.is_recording || (self.mode == AppMode::VideoFile && self.is_processing) {
                                     if let Some(exporter) = &mut self.data_exporter {
                                         exporter.add_frame(tracking_result.clone(), self.sim_time);
                                     }
-                                    
+
+                                    // Draw overlay directly onto the frame for video file processing
+                                    let final_overlay_frame = if self.mode == AppMode::VideoFile {
+                                        self.draw_overlay_on_image(&frame, &tracking_result)
+                                    } else {
+                                        overlay_frame.clone()
+                                    };
+
                                     if let Some(recorder) = &mut self.recorder {
-                                        recorder.add_frame(&frame, Some(&overlay_frame));
+                                        recorder.add_frame(&frame, Some(&final_overlay_frame));
                                     }
                                 }
                             }
@@ -1482,17 +1913,17 @@ impl eframe::App for ArmTrackerApp {
                             }
                         }
                     }
-                    
+
                     // Update texture
                     let size = [frame.width() as usize, frame.height() as usize];
                     let rgba = frame.to_rgba8();
                     let pixels = rgba.as_flat_samples();
-                    
+
                     let color_image = egui::ColorImage::from_rgba_unmultiplied(
                         size,
                         pixels.as_slice(),
                     );
-                    
+
                     if let Some(texture) = &mut self.current_frame_texture {
                         texture.set(color_image, Default::default());
                     } else {
@@ -1502,7 +1933,7 @@ impl eframe::App for ArmTrackerApp {
                             Default::default(),
                         ));
                     }
-                    
+
                     // Check if video processing is complete
                     if self.mode == AppMode::VideoFile && self.video_progress >= 0.99 {
                         self.processing_complete = true;
@@ -1514,7 +1945,7 @@ impl eframe::App for ArmTrackerApp {
                 }
                 Err(_) => {
                     // End of video or error
-                    if self.mode == AppMode::VideoFile {
+                    if self.mode == AppMode::VideoFile && !self.is_playback_mode {
                         self.processing_complete = true;
                         self.is_processing = false;
                         if self.recorder.is_some() {

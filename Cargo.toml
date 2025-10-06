@@ -23,6 +23,7 @@ eframe = "0.24"
 egui = "0.24"
 egui_extras = "0.24"
 image = { version = "0.24", features = ["jpeg", "png"] }
+imageproc = "0.23"
 cocoa = "0.25"
 objc = "0.2"
 

@@ -141,11 +141,21 @@ impl VideoFileReader {
         self.loading_progress = 0.1;
         self.loading_message = format!("Extracting {} frames...", self.total_frames);
 
-        // Extract frames as images
+        // Calculate aspect-preserving dimensions
+        // Target max dimension of 640 while preserving aspect ratio
+        let aspect_ratio = self.width as f32 / self.height as f32;
+        let (target_width, target_height) = if self.width > self.height {
+            (640, (640.0 / aspect_ratio) as u32)
+        } else {
+            ((640.0 * aspect_ratio) as u32, 640)
+        };
+
+        // Extract frames as images with aspect ratio preservation
+        let scale_filter = format!("scale={}:{}:force_original_aspect_ratio=decrease", target_width, target_height);
         let status = Command::new("ffmpeg")
             .args(&[
                 "-i", self.path.to_str().unwrap(),
-                "-vf", "scale=640:480",
+                "-vf", &scale_filter,
                 &format!("{}/frame_%04d.png", temp_dir.display()),
             ])
             .status()
@@ -216,6 +226,10 @@ impl VideoFileReader {
         } else {
             self.current_frame as f32 / self.total_frames as f32
         }
+    }
+
+    pub fn get_aspect_ratio(&self) -> f32 {
+        self.width as f32 / self.height as f32
     }
 }
 
@@ -338,6 +352,17 @@ impl VideoSource {
         match self {
             VideoSource::Camera(_) => 0.0,
             VideoSource::File(reader) => reader.get_progress(),
+        }
+    }
+
+    pub fn get_aspect_ratio(&self) -> Option<f32> {
+        match self {
+            VideoSource::Camera(camera) => {
+                let cam = camera.lock().unwrap();
+                let resolution = cam.resolution();
+                Some(resolution.width() as f32 / resolution.height() as f32)
+            }
+            VideoSource::File(reader) => Some(reader.get_aspect_ratio()),
         }
     }
 }
