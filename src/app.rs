@@ -90,6 +90,7 @@ pub struct ArmTrackerApp {
 
     // Time tracking for frame processing
     sim_time: f64,
+    last_frame_time: f64,
 
     #[cfg(target_os = "macos")]
     pub(crate) macos_icon_set: bool,
@@ -167,6 +168,7 @@ impl ArmTrackerApp {
             current_frame_texture: None,
             overlay_frame_texture: None,
             sim_time: 0.0,
+            last_frame_time: 0.0,
             #[cfg(target_os = "macos")]
             macos_icon_set: false,
         }
@@ -472,18 +474,42 @@ impl ArmTrackerApp {
         }
     }
     
-    fn on_mode_changed(&mut self, _old_mode: AppMode, new_mode: AppMode) {
+    fn on_mode_changed(&mut self, old_mode: AppMode, new_mode: AppMode) {
         match new_mode {
             AppMode::Live => {
+                // Clear any video file sources when switching to live
+                if old_mode == AppMode::VideoFile || old_mode == AppMode::Gallery {
+                    self.video_source = None;
+                    self.overlay_video_source = None;
+                    self.selected_video = None;
+                    self.selected_gallery_video = None;
+                    self.is_playback_mode = false;
+                    self.processing_complete = false;
+                    self.is_processing = false;
+                    self.current_frame_texture = None;
+                    self.overlay_frame_texture = None;
+                }
                 eprintln!("Switched to Live Camera mode");
             }
             AppMode::VideoFile => {
-                if self.video_source.is_some() && self.mode == AppMode::Live {
+                // Stop camera when switching to video file
+                if old_mode == AppMode::Live {
                     self.stop_camera();
                 }
                 eprintln!("Switched to Video File mode");
             }
             AppMode::Gallery => {
+                // Clear camera when switching to gallery
+                if old_mode == AppMode::Live {
+                    self.stop_camera();
+                }
+                // Clear video processing state
+                self.video_source = None;
+                self.overlay_video_source = None;
+                self.is_playback_mode = false;
+                self.processing_complete = false;
+                self.is_processing = false;
+
                 // Refresh gallery when entering gallery mode
                 let _ = self.video_gallery.scan_videos();
                 eprintln!("Switched to Gallery mode");
@@ -1752,67 +1778,83 @@ impl eframe::App for ArmTrackerApp {
         if self.is_playback_mode {
             // Playback mode - read from both raw and overlay sources
             if self.is_playing {
-                // Get total frames to check bounds
-                let total_frames = if let Some(VideoSource::File(reader)) = &self.video_source {
-                    reader.get_total_frames()
+                // Get video info for FPS
+                let fps = if let Some(info) = self.video_source.as_ref().and_then(|s| s.get_info()) {
+                    info.fps as f64
                 } else {
-                    0
+                    30.0 // Default FPS
                 };
 
-                // Check if we've reached the end
-                if self.current_video_frame >= total_frames.saturating_sub(1) {
-                    self.is_playing = false;
-                    self.current_video_frame = total_frames.saturating_sub(1);
-                } else {
-                    // Read raw video frame
-                    if let Some(video_source) = self.video_source.as_mut() {
-                        if let Ok(frame) = video_source.read_frame() {
-                            let size = [frame.width() as usize, frame.height() as usize];
-                            let rgba = frame.to_rgba8();
-                            let pixels = rgba.as_flat_samples();
+                // Calculate time per frame based on speed
+                let frame_interval = 1.0 / (fps * self.video_playback_speed as f64);
 
-                            let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                                size,
-                                pixels.as_slice(),
-                            );
+                // Check if enough time has passed to advance frame
+                let time_since_last_frame = self.sim_time - self.last_frame_time;
 
-                            if let Some(texture) = &mut self.current_frame_texture {
-                                texture.set(color_image, Default::default());
-                            } else {
-                                self.current_frame_texture = Some(ctx.load_texture(
-                                    "video_frame",
-                                    color_image,
-                                    Default::default(),
-                                ));
-                            }
+                if time_since_last_frame >= frame_interval {
+                    // Get total frames to check bounds
+                    let total_frames = if let Some(VideoSource::File(reader)) = &self.video_source {
+                        reader.get_total_frames()
+                    } else {
+                        0
+                    };
+
+                    // Check if we've reached the end
+                    if self.current_video_frame >= total_frames.saturating_sub(1) {
+                        self.is_playing = false;
+                        self.current_video_frame = total_frames.saturating_sub(1);
+                    } else {
+                        self.current_video_frame += 1;
+                        self.last_frame_time = self.sim_time;
+                    }
+                }
+
+                // Load and display current frame (always update texture even if frame didn't advance)
+                if let Some(VideoSource::File(reader)) = &mut self.video_source {
+                    if let Some(frame) = reader.get_frame(self.current_video_frame) {
+                        let size = [frame.width() as usize, frame.height() as usize];
+                        let rgba = frame.to_rgba8();
+                        let pixels = rgba.as_flat_samples();
+
+                        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                            size,
+                            pixels.as_slice(),
+                        );
+
+                        if let Some(texture) = &mut self.current_frame_texture {
+                            texture.set(color_image, Default::default());
+                        } else {
+                            self.current_frame_texture = Some(ctx.load_texture(
+                                "video_frame",
+                                color_image,
+                                Default::default(),
+                            ));
                         }
                     }
+                }
 
-                    // Read overlay video frame
-                    if let Some(overlay_source) = self.overlay_video_source.as_mut() {
-                        if let Ok(overlay_frame) = overlay_source.read_frame() {
-                            let size = [overlay_frame.width() as usize, overlay_frame.height() as usize];
-                            let rgba = overlay_frame.to_rgba8();
-                            let pixels = rgba.as_flat_samples();
+                // Load overlay frame
+                if let Some(VideoSource::File(reader)) = &mut self.overlay_video_source {
+                    if let Some(overlay_frame) = reader.get_frame(self.current_video_frame) {
+                        let size = [overlay_frame.width() as usize, overlay_frame.height() as usize];
+                        let rgba = overlay_frame.to_rgba8();
+                        let pixels = rgba.as_flat_samples();
 
-                            let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                                size,
-                                pixels.as_slice(),
-                            );
+                        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                            size,
+                            pixels.as_slice(),
+                        );
 
-                            if let Some(texture) = &mut self.overlay_frame_texture {
-                                texture.set(color_image, Default::default());
-                            } else {
-                                self.overlay_frame_texture = Some(ctx.load_texture(
-                                    "overlay_frame",
-                                    color_image,
-                                    Default::default(),
-                                ));
-                            }
+                        if let Some(texture) = &mut self.overlay_frame_texture {
+                            texture.set(color_image, Default::default());
+                        } else {
+                            self.overlay_frame_texture = Some(ctx.load_texture(
+                                "overlay_frame",
+                                color_image,
+                                Default::default(),
+                            ));
                         }
                     }
-
-                    self.current_video_frame += 1;
                 }
             } else {
                 // When paused or scrubbing, load the current frame
